@@ -42,6 +42,7 @@ class ReplicateModelNodeBase:
     MAX_IMAGES: int = 5
     REQUEST_TIMEOUT: int = 300
     POLL_INTERVAL: int = 2
+    IMAGE_INPUT_KEYS: Tuple[str, ...] = ("输入图片",)
 
     _version_cache: Dict[str, str] = {}
 
@@ -87,10 +88,28 @@ class ReplicateModelNodeBase:
         candidate = min(candidate, self.MAX_IMAGES)
         return candidate
 
-    def _prepare_images(self, image_batch: Any) -> List[str]:
-        images = convert_image_batch_to_base64_list(image_batch, self.MAX_REFERENCE_IMAGES)
+    def _prepare_images(self, image_batches: List[Any]) -> List[str]:
+        images: List[str] = []
+
+        for batch in image_batches:
+            if batch is None:
+                continue
+
+            limit = None
+            if self.MAX_REFERENCE_IMAGES is not None:
+                remaining = self.MAX_REFERENCE_IMAGES - len(images)
+                if remaining <= 0:
+                    break
+                limit = remaining
+
+            images.extend(convert_image_batch_to_base64_list(batch, limit))
+
         if self.REQUIRE_IMAGE and not images:
             raise ValueError("请提供至少一张输入图片")
+
+        if self.MAX_REFERENCE_IMAGES is not None:
+            return images[: self.MAX_REFERENCE_IMAGES]
+
         return images
 
     async def _create_and_wait(
@@ -247,7 +266,12 @@ class ReplicateModelNodeBase:
                 kwargs.get("数量输入"),
             )
 
-            image_inputs = self._prepare_images(kwargs.get("输入图片"))
+            raw_batches = [
+                kwargs.get(key)
+                for key in self.IMAGE_INPUT_KEYS
+                if kwargs.get(key) is not None
+            ]
+            image_inputs = self._prepare_images(raw_batches)
             payload = self._build_payload(prompt, image_inputs, kwargs)
 
             image_arrays, text_parts, raw_records = self._execute_predictions(
@@ -279,6 +303,7 @@ class ReplicateQwenImageEditPlus(ReplicateModelNodeBase):
     MODEL_NAME = "qwen-image-edit-plus"
     REQUIRE_IMAGE = True
     MAX_REFERENCE_IMAGES = 4
+    IMAGE_INPUT_KEYS = ("输入图片", "输入图片2", "输入图片3")
     DESCRIPTION = "图像编辑：根据中文提示修改输入图片，支持多图批量生成。"
     CATEGORY = "Replicate/图像"
 
@@ -309,6 +334,24 @@ class ReplicateQwenImageEditPlus(ReplicateModelNodeBase):
                 }),
             },
             "optional": {
+                "输入图片2": ("IMAGE", {
+                    "tooltip": "第二张参考图片（可选）。"
+                }),
+                "输入图片3": ("IMAGE", {
+                    "tooltip": "第三张参考图片（可选）。"
+                }),
+                "输入图片2": ("IMAGE", {
+                    "tooltip": "第二张参考图片（可选）。"
+                }),
+                "输入图片3": ("IMAGE", {
+                    "tooltip": "第三张参考图片（可选）。"
+                }),
+                "输入图片2": ("IMAGE", {
+                    "tooltip": "第二张参考图片（可选）。"
+                }),
+                "输入图片3": ("IMAGE", {
+                    "tooltip": "第三张参考图片（可选）。"
+                }),
                 "提示词输入": ("STRING", {
                     "default": "",
                     "tooltip": "通过连线传入的提示词，优先级高于面板输入。"
@@ -402,6 +445,7 @@ class ReplicateSeedream4(ReplicateModelNodeBase):
     MODEL_NAME = "seedream-4"
     MAX_REFERENCE_IMAGES = 10
     SUPPORTS_NATIVE_BATCH = True
+    IMAGE_INPUT_KEYS = ("输入图片", "输入图片2", "输入图片3")
     DESCRIPTION = "Seedream 4：文本或参考图生成多张高清图像。"
     CATEGORY = "Replicate/图像"
 
@@ -547,6 +591,7 @@ class ReplicateNanoBanana(ReplicateModelNodeBase):
     MODEL_OWNER = "google"
     MODEL_NAME = "nano-banana"
     MAX_REFERENCE_IMAGES = 4
+    IMAGE_INPUT_KEYS = ("输入图片", "输入图片2", "输入图片3")
     DESCRIPTION = "Nano Banana：轻量快速的多模态图像生成。"
     CATEGORY = "Replicate/图像"
 
@@ -574,6 +619,12 @@ class ReplicateNanoBanana(ReplicateModelNodeBase):
                 }),
             },
             "optional": {
+                "输入图片2": ("IMAGE", {
+                    "tooltip": "第二张参考图片（可选）。"
+                }),
+                "输入图片3": ("IMAGE", {
+                    "tooltip": "第三张参考图片（可选）。"
+                }),
                 "提示词输入": ("STRING", {
                     "default": "",
                     "tooltip": "通过连线传入的提示词，优先级高于面板输入。"
