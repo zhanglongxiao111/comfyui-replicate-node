@@ -340,18 +340,6 @@ class ReplicateQwenImageEditPlus(ReplicateModelNodeBase):
                 "输入图片3": ("IMAGE", {
                     "tooltip": "第三张参考图片（可选）。"
                 }),
-                "输入图片2": ("IMAGE", {
-                    "tooltip": "第二张参考图片（可选）。"
-                }),
-                "输入图片3": ("IMAGE", {
-                    "tooltip": "第三张参考图片（可选）。"
-                }),
-                "输入图片2": ("IMAGE", {
-                    "tooltip": "第二张参考图片（可选）。"
-                }),
-                "输入图片3": ("IMAGE", {
-                    "tooltip": "第三张参考图片（可选）。"
-                }),
                 "提示词输入": ("STRING", {
                     "default": "",
                     "tooltip": "通过连线传入的提示词，优先级高于面板输入。"
@@ -476,6 +464,12 @@ class ReplicateSeedream4(ReplicateModelNodeBase):
                 "提示词输入": ("STRING", {
                     "default": "",
                     "tooltip": "通过连线传入的提示词，优先级高于面板输入。"
+                }),
+                "输入图片2": ("IMAGE", {
+                    "tooltip": "第二张参考图片（可选）。"
+                }),
+                "输入图片3": ("IMAGE", {
+                    "tooltip": "第三张参考图片（可选）。"
                 }),
                 "API密钥输入": ("STRING", {
                     "default": "",
