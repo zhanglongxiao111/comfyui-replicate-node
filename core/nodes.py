@@ -263,7 +263,15 @@ class ReplicateModelNodeBase:
             return (image_tensor, text_output, raw_output)
 
         except Exception as exc:
-            raise RuntimeError(format_error_message(exc))
+            formatted = format_error_message(exc)
+            lower_msg = formatted.lower()
+            if "flagged as sensitive" in lower_msg or "e005" in lower_msg:
+                fallback = json.dumps(
+                    {"error": formatted, "model": self._model_key()}, ensure_ascii=False, indent=2
+                )
+                return (None, formatted, fallback)
+
+            raise RuntimeError(formatted)
 
 
 class ReplicateQwenImageEditPlus(ReplicateModelNodeBase):
