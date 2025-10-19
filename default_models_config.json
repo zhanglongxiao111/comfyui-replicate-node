@@ -1,0 +1,40 @@
+{
+  "default_models": [
+    {
+      "name": "Nano Banana (Gemini 2.5 Flash Image)",
+      "owner": "google",
+      "model": "nano-banana",
+      "description": "Google最新的图像编辑和生成模型",
+      "version_id": "2c8a3b5b81554aa195bde461e2caa6afacd69a66c48a64fb0e650c9789f8b8a0",
+      "url": "https://replicate.com/google/nano-banana",
+      "run_count": 20801204,
+      "full_description": "Google's latest image editing model in Gemini 2.5",
+      "schema_params": [
+        "prompt",
+        "image_input",
+        "aspect_ratio",
+        "output_format"
+      ]
+    },
+    {
+      "name": "Qwen Image Edit",
+      "owner": "qwen",
+      "model": "qwen-image-edit",
+      "description": "Qwen官方图像编辑模型",
+      "version_id": "a072e0d160ef0501120a390f602404655e467a6f591f6574f5742df0b67cbba7",
+      "url": "https://replicate.com/qwen/qwen-image-edit",
+      "run_count": 586878,
+      "full_description": "Edit images using a prompt. This model extends Qwen-Image’s unique text rendering capabilities to image editing tasks, enabling precise text editing",
+      "schema_params": [
+        "seed",
+        "image",
+        "prompt",
+        "go_fast",
+        "output_format",
+        "output_quality",
+        "disable_safety_checker"
+      ]
+    }
+  ],
+  "verified_at": "2025-10-19"
+}

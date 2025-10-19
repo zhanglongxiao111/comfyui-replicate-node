@@ -1,0 +1,118 @@
+{
+  "espressotechie/qwen-imgedit-4bit": {
+    "owner": "espressotechie",
+    "model": "qwen-imgedit-4bit",
+    "description": "Qwen image edit fast",
+    "version_id": "015ae3856dbadf22a641774c812a29b626dce1a61d66ebacb270e2ab925f4c40",
+    "parameters": {
+      "seed": {
+        "type": "integer",
+        "required": false,
+        "default": "N/A",
+        "enum": null,
+        "description": "Seed for reproducibility (leave blank for random)"
+      },
+      "image": {
+        "type": "string",
+        "required": false,
+        "default": "N/A",
+        "enum": null,
+        "description": "An input image"
+      },
+      "steps": {
+        "type": "unknown",
+        "required": false,
+        "default": 2,
+        "enum": null,
+        "description": "Number of sampler steps. Choose 2 for faster results, 4 for higher quality."
+      },
+      "prompt": {
+        "type": "string",
+        "required": false,
+        "default": "",
+        "enum": null,
+        "description": ""
+      },
+      "output_format": {
+        "type": "unknown",
+        "required": false,
+        "default": "webp",
+        "enum": null,
+        "description": "Format of the output images"
+      },
+      "output_quality": {
+        "type": "integer",
+        "required": false,
+        "default": 95,
+        "enum": null,
+        "description": "Quality of the output images, from 0 to 100. 100 is best quality, 0 is lowest quality."
+      },
+      "negative_prompt": {
+        "type": "string",
+        "required": false,
+        "default": "",
+        "enum": null,
+        "description": "Things you do not want to see in your image"
+      }
+    },
+    "output_info": {
+      "supports_multiple": true,
+      "output_type": "array",
+      "schema": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "format": "uri"
+        },
+        "title": "Output"
+      }
+    },
+    "concurrent_support": "未知"
+  },
+  "google/nano-banana": {
+    "owner": "google",
+    "model": "nano-banana",
+    "description": "Google's latest image editing model in Gemini 2.5",
+    "version_id": "2c8a3b5b81554aa195bde461e2caa6afacd69a66c48a64fb0e650c9789f8b8a0",
+    "parameters": {
+      "prompt": {
+        "type": "string",
+        "required": false,
+        "default": "N/A",
+        "enum": null,
+        "description": "A text description of the image you want to generate"
+      },
+      "image_input": {
+        "type": "array",
+        "required": false,
+        "default": [],
+        "enum": null,
+        "description": "Input images to transform or use as reference (supports multiple images)"
+      },
+      "aspect_ratio": {
+        "type": "unknown",
+        "required": false,
+        "default": "match_input_image",
+        "enum": null,
+        "description": "Aspect ratio of the generated image"
+      },
+      "output_format": {
+        "type": "unknown",
+        "required": false,
+        "default": "jpg",
+        "enum": null,
+        "description": "Format of the output image"
+      }
+    },
+    "output_info": {
+      "supports_multiple": false,
+      "output_type": "string",
+      "schema": {
+        "type": "string",
+        "title": "Output",
+        "format": "uri"
+      }
+    },
+    "concurrent_support": "未知"
+  }
+}

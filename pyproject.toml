@@ -1,0 +1,27 @@
+[project]
+name = "comfyui-replicate-nodes"
+description = "ComfyUI nodes for Replicate API integration"
+version = "1.0.0"
+authors = [
+    {name = "Your Name", email = "your.email@example.com"},
+]
+dependencies = [
+    "aiohttp>=3.8.0",
+    "Pillow>=9.0.0",
+    "numpy>=1.21.0",
+]
+requires-python = ">=3.8"
+readme = "README.md"
+license = {text = "MIT"}
+
+[project.urls]
+Repository = "https://github.com/your-username/comfyui-replicate-nodes"
+Issues = "https://github.com/your-username/comfyui-replicate-nodes/issues"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["*"]

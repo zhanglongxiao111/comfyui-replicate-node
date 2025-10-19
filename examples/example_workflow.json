@@ -1,0 +1,145 @@
+{
+  "last_node_id": 15,
+  "last_link_id": 20,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "ReplicateConfig",
+      "pos": [50, 50],
+      "size": {"0": 320, "1": 180},
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "outputs": [
+        {"name": "status", "type": "STRING", "links": [], "shape": 3, "slot_index": 0},
+        {"name": "success", "type": "BOOLEAN", "links": [], "shape": 3, "slot_index": 1}
+      ],
+      "properties": {"Node name for S&R": "ReplicateConfig"},
+      "widgets_values": [
+        "your_replicate_api_token_here",
+        true,
+        false
+      ]
+    },
+    {
+      "id": 2,
+      "type": "ReplicateModelSelector",
+      "pos": [50, 300],
+      "size": {"0": 400, "1": 150},
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "outputs": [
+        {"name": "model_id", "type": "STRING", "links": [1], "shape": 3, "slot_index": 0},
+        {"name": "model_name", "type": "STRING", "links": [], "shape": 3, "slot_index": 1},
+        {"name": "model_version", "type": "STRING", "links": [2], "shape": 3, "slot_index": 2},
+        {"name": "model_info", "type": "DICT", "links": [3], "shape": 3, "slot_index": 3}
+      ],
+      "properties": {"Node name for S&R": "ReplicateModelSelector"},
+      "widgets_values": [
+        "stable diffusion",
+        "",
+        false,
+        50
+      ]
+    },
+    {
+      "id": 3,
+      "type": "ReplicateDynamicNode",
+      "pos": [500, 300],
+      "size": {"0": 400, "1": 200},
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {"name": "model_info", "type": "DICT", "link": 3},
+        {"name": "model_version", "type": "STRING", "link": 2},
+        {"name": "api_token", "type": "STRING", "link": null}
+      ],
+      "outputs": [
+        {"name": "prepared_inputs", "type": "DICT", "links": [4], "shape": 3, "slot_index": 0}
+      ],
+      "properties": {"Node name for S&R": "ReplicateDynamicNode"},
+      "widgets_values": [
+        "",
+        ""
+      ]
+    },
+    {
+      "id": 4,
+      "type": "ReplicatePrediction",
+      "pos": [950, 300],
+      "size": {"0": 400, "1": 200},
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {"name": "model_version", "type": "STRING", "link": 2},
+        {"name": "prepared_inputs", "type": "DICT", "link": 4},
+        {"name": "api_token", "type": "STRING", "link": null}
+      ],
+      "outputs": [
+        {"name": "prediction_id", "type": "STRING", "links": [], "shape": 3, "slot_index": 0},
+        {"name": "status", "type": "STRING", "links": [5], "shape": 3, "slot_index": 1},
+        {"name": "results", "type": "DICT", "links": [6], "shape": 3, "slot_index": 2}
+      ],
+      "properties": {"Node name for S&R": "ReplicatePrediction"},
+      "widgets_values": [
+        "",
+        300,
+        2,
+        ""
+      ]
+    },
+    {
+      "id": 5,
+      "type": "PreviewText",
+      "pos": [1400, 300],
+      "size": {"0": 400, "1": 200},
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {"name": "text", "type": "STRING", "link": 5}
+      ],
+      "outputs": [],
+      "properties": {"Node name for S&R": "PreviewText"},
+      "widgets_values": []
+    },
+    {
+      "id": 6,
+      "type": "ShowText",
+      "pos": [1400, 550],
+      "size": {"0": 400, "1": 200},
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {"name": "text", "type": "STRING", "link": null}
+      ],
+      "outputs": [],
+      "properties": {"Node name for S&R": "ShowText"},
+      "widgets_values": []
+    }
+  ],
+  "links": [
+    [1, 2, 0, 3, 0, "STRING"],
+    [2, 2, 2, 3, 1, "STRING"],
+    [2, 2, 2, 4, 0, "STRING"],
+    [3, 2, 3, 3, 0, "DICT"],
+    [4, 3, 0, 4, 1, "DICT"],
+    [5, 4, 1, 5, 0, "STRING"],
+    [6, 4, 2, 6, 0, "STRING"]
+  ],
+  "groups": [
+    {
+      "title": "Replicate Workflow",
+      "bounding": [30, 10, 1570, 780],
+      "color": "#3f789e",
+      "font_size": 24
+    }
+  ],
+  "config": {},
+  "extra": {},
+  "version": 0.4
+}
