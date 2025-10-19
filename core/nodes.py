@@ -528,15 +528,16 @@ class ReplicateSeedream4(ReplicateModelNodeBase):
         iteration: int,
     ) -> Dict[str, Any]:
         data = dict(payload)
-
-        if requested_count > 1:
-            data["sequential_image_generation"] = "auto"
-            data["max_images"] = min(15, requested_count)
+        auto_mode = requested_count > 1
+        data["sequential_image_generation"] = "auto" if auto_mode else data.get(
+            "sequential_image_generation",
+            "disabled",
+        )
+        if auto_mode:
+            total_refs = len(payload.get("image_input", []))
+            capacity = max(1, 15 - total_refs)
+            data["max_images"] = min(requested_count, capacity)
         else:
-            data["sequential_image_generation"] = data.get(
-                "sequential_image_generation",
-                "disabled",
-            )
             data.pop("max_images", None)
 
         return data
