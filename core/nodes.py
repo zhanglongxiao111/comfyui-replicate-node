@@ -128,7 +128,16 @@ class ReplicateModelNodeBase:
 
         while len(images) < desired_count:
             iteration += 1
-            request_count = desired_count if self.SUPPORTS_NATIVE_BATCH and iteration == 1 else 1
+
+            remaining = desired_count - len(images)
+            if self.SUPPORTS_NATIVE_BATCH:
+                if iteration == 1:
+                    request_count = desired_count
+                else:
+                    request_count = remaining
+            else:
+                request_count = 1
+
             request_inputs = self._prepare_request_payload(payload, request_count, iteration)
 
             prediction, result = await self._create_and_wait(
@@ -156,7 +165,11 @@ class ReplicateModelNodeBase:
                 text_parts.append(result.logs)
 
             if self.SUPPORTS_NATIVE_BATCH:
-                break
+                if len(images) >= desired_count:
+                    break
+                if iteration >= desired_count:
+                    raise RuntimeError("模型未返回足够的图像，请尝试减少生成数量或检查输入。")
+                continue
 
             if iteration >= desired_count:
                 break
