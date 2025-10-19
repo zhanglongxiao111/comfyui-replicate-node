@@ -1,168 +1,80 @@
-# ComfyUI Replicate Nodes
+# ComfyUI Replicate 节点集
 
-将 Replicate API 的强大 AI 模型集成到 ComfyUI 中,支持图像生成、图像编辑、文本生成等多种功能。
+将 Replicate 上的远程模型平滑接入 ComfyUI。本仓库提供三个高频模型的专用节点，以及一个 API 密钥共享节点，直接输出 ComfyUI 可识别的图像张量与文本结果，便于在工作流中继续处理或展示。
 
-## ✨ 特性
+## ✨ 功能亮点
 
-- 🔍 **模型搜索**: 直接在 ComfyUI 中浏览和搜索 Replicate 模型
-- 🎯 **预设模型**: 内置推荐模型,开箱即用
-- 🔄 **动态参数**: 根据模型 Schema 自动生成输入参数
-- 🖼️ **智能图像处理**: 支持最多 4 个图像输入,自动格式转换
-- 📝 **文本提示**: 智能识别并处理提示词参数
-- ⚡ **异步执行**: 非阻塞预测执行,实时状态监控
-- 🎨 **输出处理**: 自动下载并转换为 ComfyUI 格式
+- **专用节点**：内置 `qwen/qwen-image-edit-plus`、`bytedance/seedream-4`、`google/nano-banana` 三个模型的定制节点，中文界面，参数易懂。
+- **端口/面板双输入**：提示词、生成数量、API 密钥均可通过节点面板或上游端口传入，方便自动化流程。
+- **多图处理**：自动识别模型是否支持批量生成。若不支持，则并发调用补足，最多输出 5 张图像。
+- **输出即用**：返回的图像直接是 ComfyUI 期待的 `IMAGE` 张量，可接驳预览、保存或后处理节点。
+- **API 密钥共享**：通过独立节点统一保管或分发 Replicate API key，减少重复输入。
 
-## 📦 快速安装
+## 📦 安装方式
 
-### 方法 1: 自动安装 (推荐)
+### 方式一：使用插件管理器（推荐）
+
+在 ComfyUI 内置的插件管理器中搜索 `comfyui-replicate-node` 并安装，随后点击“更新/刷新”即可。
+
+### 方式二：手动克隆
 
 ```bash
-# 进入 ComfyUI 的 custom_nodes 目录
 cd /path/to/ComfyUI/custom_nodes
-
-# 克隆或下载本插件
-git clone https://github.com/your-username/comfyui-replicate-nodes.git
-
-# 进入插件目录
-cd comfyui-replicate-nodes
-
-# 运行安装脚本
-python install.py
+git clone https://github.com/zhanglongxiao111/comfyui-replicate-node.git
+cd comfyui-replicate-node
+python install.py  # 可选：校验依赖与配置
 ```
 
-### 方法 2: 手动安装
+若只想手动安装依赖，可执行：
 
 ```bash
-cd /path/to/ComfyUI/custom_nodes/comfyui-replicate-nodes
 pip install -r requirements.txt
 ```
 
-详细安装说明请查看 [INSTALLATION.md](INSTALLATION.md)
+## 🔑 配置 Replicate API Token
 
-## ⚙️ 配置
+1. 访问 [Replicate 账号页面](https://replicate.com/account/api-tokens) 获取 `r8_xxx` 形式的 token。
+2. 在 ComfyUI 中有两种方式：  
+   - **使用节点**：拖入 `Replicate API 密钥` 节点，输入 token，勾选“保存到配置”后，可供其他节点复用。  
+   - **环境变量 / 配置文件**：在系统中设置 `REPLICATE_API_TOKEN`，或编辑仓库根目录的 `config.json`：
+     ```json
+     {
+       "replicate_api_token": "r8_your_token_here"
+     }
+     ```
 
-### 获取 API Token
+## 🧩 节点总览
 
-1. 注册 [Replicate](https://replicate.com) 账号
-2. 获取你的 [API Token](https://replicate.com/account/api-tokens)
+| 节点名称 | 说明 | 关键输入 | 输出 |
+| --- | --- | --- | --- |
+| **Replicate API 密钥** | 读取/保存 API token，输出给其他节点使用 | API密钥、保存到配置、允许配置回退 | API密钥、状态 |
+| **qwen/qwen-image-edit-plus** | 基于中文指令编辑输入图片，支持多图生成 | API密钥、提示词、输入图片、生成数量、输出参数 | 生成图像、文本输出、原始结果 |
+| **bytedance/seedream-4** | 文生图/图生图混合模型，可原生批量生成 | API密钥、提示词、生成数量、参考图等 | 生成图像、文本输出、原始结果 |
+| **google/nano-banana** | 轻量级多模态生成模型，支持参考图 | API密钥、提示词、生成数量、参考图等 | 生成图像、文本输出、原始结果 |
 
-### 配置 Token (三选一)
+所有节点的面板与端口文案均为中文，常用参数带有 tooltip 提示，方便快速上手。
 
-**方法 1: 使用节点** (最简单)
-- 在 ComfyUI 中添加 `Replicate Config` 节点
-- 输入 Token,勾选 `save_token` 和 `test_connection`
+## 🚀 快速上手示例
 
-**方法 2: 环境变量**
-```bash
-export REPLICATE_API_TOKEN=r8_your_token_here
-```
+1. 在画布中放置 `Replicate API 密钥` 节点，填写 token 并连接到下游节点的密钥端口。
+2. 拖入例如 `qwen/qwen-image-edit-plus` 节点：  
+   - 连接提示词、输入图片、生成数量等端口；  
+   - 节点会根据模型能力自动决定批量或并发生成，最多输出 5 张图。
+3. 将节点输出接到 `Preview Image` 或 `Save Image` 等默认节点即可查看结果。
+4. 若需要生成多张不同画面，可通过 `数量输入` 端口动态传值，配合工作流控制。
 
-**方法 3: 配置文件**
-编辑 `config.json`:
-```json
-{
-  "replicate_api_token": "r8_your_token_here"
-}
-```
+## 🧪 开发与测试
 
-## 🚀 使用方法
-
-### 基础工作流
-
-```
-1. Replicate Model Selector
-   ├─ model_preset: "google/nano-banana" (或搜索其他模型)
-   └─ 输出: model_info, model_version
-
-2. Replicate Dynamic Node
-   ├─ 连接: model_info, model_version
-   ├─ prompt_text: "你的提示词"
-   ├─ primary_image: (可选) 连接图像
-   └─ 输出: prepared_inputs, schema_summary
-
-3. Replicate Prediction
-   ├─ 连接: prepared_inputs, model_version
-   └─ 输出: prediction_id, status, results
-
-4. Replicate Output Processor
-   ├─ 连接: results
-   └─ 输出: image, text, raw_output
-```
-
-### 预设模型
-
-插件内置了以下推荐模型:
-
-- **google/nano-banana** - Gemini 2.5 Flash (视觉理解)
-- **qwen/qwen-image-edit** - Qwen 图像编辑
-- **stability-ai/sdxl** - Stable Diffusion XL
-- **black-forest-labs/flux-schnell** - FLUX 快速生成
-
-也可以选择 `Custom (use search)` 搜索其他模型。
-
-## 📖 文档
-
-- 📘 [INSTALLATION.md](INSTALLATION.md) - 详细安装指南
-- 📗 [docs/QUICK_START.md](docs/QUICK_START.md) - 快速入门教程
-- 📙 [docs/PRESET_MODELS_GUIDE.md](docs/PRESET_MODELS_GUIDE.md) - 预设模型指南
-- 📕 [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md) - 项目结构说明
-
-## 🔧 节点说明
-
-| 节点 | 功能 | 主要输入 | 主要输出 |
-|------|------|----------|----------|
-| **Replicate Config** | 配置 API Token | api_token | status, success |
-| **Replicate Model Selector** | 选择模型 | model_preset, search_query | model_info, model_version |
-| **Replicate Dynamic Node** | 准备输入参数 | model_info, prompt_text, images | prepared_inputs, schema_summary |
-| **Replicate Prediction** | 执行预测 | prepared_inputs, model_version | prediction_id, results |
-| **Replicate Output Processor** | 处理输出 | results | image, text, raw_output |
-
-## 📁 项目结构
-
-```
-comfyui-replicate-nodes/
-├── __init__.py              # 插件入口
-├── requirements.txt         # 依赖列表
-├── config.json              # 配置文件
-├── install.py               # 安装脚本
-├── core/                    # 核心代码
-│   ├── nodes.py            # 节点实现
-│   ├── replicate_client.py # API 客户端
-│   └── utils.py            # 工具函数
-├── tests/                   # 测试脚本
-├── docs/                    # 文档
-└── examples/                # 示例
-```
-
-详见 [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md)
-
-## 🐛 故障排查
-
-### 常见问题
-
-**导入错误**: 检查 `core/` 目录是否完整,重新运行 `python install.py`
-
-**找不到节点**: 检查 ComfyUI 控制台错误,确认依赖已安装
-
-**Token 无效**: 检查 Token 格式,重新从 Replicate 获取
-
-**网络错误**: 检查网络连接,增加 timeout 值
-
-更多详情请查看 [INSTALLATION.md](INSTALLATION.md) 的故障排查部分。
+- 验证 Replicate API 可用：`python tests/test_prediction.py`（需要有效 token）。
+- 额外示例工作流位于 `examples/`，可作为画布模板。
 
 ## 🤝 贡献
 
-欢迎提交 Issue 和 Pull Request!
+欢迎提交 Issue 与 Pull Request。若有更多模型需求或功能建议，直接在仓库讨论区反馈即可。
 
 ## 📄 许可证
 
-MIT License
-
-## 🙏 致谢
-
-- [ComfyUI](https://github.com/comfyanonymous/ComfyUI)
-- [Replicate](https://replicate.com)
+本项目采用 MIT License，详情见仓库根目录的 `LICENSE`（如需自定义许可，可按需调整）。
 
 ---
-
-⭐ 如果这个项目对你有帮助,请给个 Star!
+如果该插件对你有帮助，欢迎在 GitHub 上点个 ⭐ 支持作者！
