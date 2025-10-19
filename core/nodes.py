@@ -315,7 +315,7 @@ class ReplicateQwenImageEditPlus(ReplicateModelNodeBase):
                     "default": "",
                     "password": True,
                     "placeholder": "留空使用已保存的密钥",
-                    "tooltip": "用于访问 Replicate 服务的 API 密钥，可通过端口输入或自动读取配置。"
+                    "tooltip": "用于访问 Replicate 服务的 API 密钥，可通过端口输入或自动读取配置（支持环境变量 REPLICATE_API_TOKEN）。"
                 }),
                 "提示词": ("STRING", {
                     "default": "",
@@ -445,7 +445,7 @@ class ReplicateSeedream4(ReplicateModelNodeBase):
                     "default": "",
                     "password": True,
                     "placeholder": "留空使用已保存的密钥",
-                    "tooltip": "用于访问 Replicate 服务的 API 密钥，可通过端口输入或自动读取配置。"
+                    "tooltip": "用于访问 Replicate 服务的 API 密钥，可通过端口输入或自动读取配置（支持环境变量 REPLICATE_API_TOKEN）。"
                 }),
                 "提示词": ("STRING", {
                     "default": "",
@@ -461,15 +461,18 @@ class ReplicateSeedream4(ReplicateModelNodeBase):
                 }),
             },
             "optional": {
-                "提示词输入": ("STRING", {
-                    "default": "",
-                    "tooltip": "通过连线传入的提示词，优先级高于面板输入。"
+                "输入图片": ("IMAGE", {
+                    "tooltip": "可选的参考图片，用于图生图或多图混合生成。"
                 }),
                 "输入图片2": ("IMAGE", {
                     "tooltip": "第二张参考图片（可选）。"
                 }),
                 "输入图片3": ("IMAGE", {
                     "tooltip": "第三张参考图片（可选）。"
+                }),
+                "提示词输入": ("STRING", {
+                    "default": "",
+                    "tooltip": "通过连线传入的提示词，优先级高于面板输入。"
                 }),
                 "API密钥输入": ("STRING", {
                     "default": "",
@@ -480,9 +483,6 @@ class ReplicateSeedream4(ReplicateModelNodeBase):
                     "min": 0,
                     "max": 5,
                     "tooltip": "通过连线设置的生成数量，大于 0 时覆盖面板数值。"
-                }),
-                "输入图片": ("IMAGE", {
-                    "tooltip": "可选的参考图片，用于图生图或多图混合生成。"
                 }),
                 "分辨率": (["1K", "2K", "4K", "custom"], {
                     "default": "2K",
@@ -597,7 +597,7 @@ class ReplicateNanoBanana(ReplicateModelNodeBase):
                     "default": "",
                     "password": True,
                     "placeholder": "留空使用已保存的密钥",
-                    "tooltip": "用于访问 Replicate 服务的 API 密钥，可通过端口输入或自动读取配置。"
+                    "tooltip": "用于访问 Replicate 服务的 API 密钥，可通过端口输入或自动读取配置（支持环境变量 REPLICATE_API_TOKEN）。"
                 }),
                 "提示词": ("STRING", {
                     "default": "",
@@ -613,6 +613,9 @@ class ReplicateNanoBanana(ReplicateModelNodeBase):
                 }),
             },
             "optional": {
+                "输入图片": ("IMAGE", {
+                    "tooltip": "可选的参考图片列表，帮助模型保持角色与风格一致。"
+                }),
                 "输入图片2": ("IMAGE", {
                     "tooltip": "第二张参考图片（可选）。"
                 }),
@@ -632,9 +635,6 @@ class ReplicateNanoBanana(ReplicateModelNodeBase):
                     "min": 0,
                     "max": 5,
                     "tooltip": "通过连线设置的生成数量，大于 0 时覆盖面板数值。"
-                }),
-                "输入图片": ("IMAGE", {
-                    "tooltip": "可选的参考图片列表，帮助模型保持角色与风格一致。"
                 }),
                 "长宽比": ([
                     "match_input_image",
