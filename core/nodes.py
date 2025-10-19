@@ -11,6 +11,15 @@ from typing import Dict, Any, Optional, Tuple
 import numpy as np
 from PIL import Image
 
+# 导入 nest_asyncio 以支持嵌套事件循环
+try:
+    import nest_asyncio
+    nest_asyncio.apply()
+except ImportError:
+    nest_asyncio = None
+    logger = logging.getLogger(__name__)
+    logger.warning("nest_asyncio not installed. Some async operations may fail. Install with: pip install nest-asyncio")
+
 from .replicate_client import ReplicateClient, ModelInfo, PredictionStatus
 from .utils import (
     load_api_token, save_api_token, convert_image_to_base64,
@@ -22,7 +31,7 @@ from .utils import (
 logger = logging.getLogger(__name__)
 
 class ReplicateModelSelector:
-    """Node for selecting Replicate models"""
+    """模型选择节点"""
 
     # 预设的推荐模型列表
     PRESET_MODELS = [
@@ -30,61 +39,64 @@ class ReplicateModelSelector:
         "qwen/qwen-image-edit",  # Qwen Image Edit
         "stability-ai/sdxl",  # Stable Diffusion XL
         "black-forest-labs/flux-schnell",  # FLUX Schnell
-        "Custom (use search)"  # 自定义搜索选项
+        "自定义(使用搜索)"  # 自定义搜索选项
     ]
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "model_preset": (cls.PRESET_MODELS, {
+                "模型预设": (cls.PRESET_MODELS, {
                     "default": "google/nano-banana"
                 }),
-                "search_query": ("STRING", {
+                "搜索关键词": ("STRING", {
                     "default": "",
                     "multiline": False,
-                    "placeholder": "仅在选择'Custom'时使用搜索"
+                    "placeholder": "仅在选择'自定义'时使用"
                 }),
-                "api_token": ("STRING", {
+                "API密钥": ("STRING", {
                     "default": "",
                     "multiline": False,
-                    "placeholder": "Replicate API token (leave empty to use saved token)"
+                    "placeholder": "留空则使用已保存的密钥"
                 }),
-                "refresh": ("BOOLEAN", {"default": False}),
+                "刷新缓存": ("BOOLEAN", {"default": False}),
             },
             "optional": {
-                "limit": ("INT", {"default": 50, "min": 1, "max": 100}),
+                "搜索数量": ("INT", {"default": 50, "min": 1, "max": 100}),
             }
         }
 
-    RETURN_TYPES = ("STRING", "STRING", "STRING", "DICT")  # model_id, model_name, model_version, model_info
-    RETURN_NAMES = ("model_id", "model_name", "model_version", "model_info")
+    RETURN_TYPES = ("STRING", "STRING", "STRING", "DICT")
+    RETURN_NAMES = ("模型ID", "模型名称", "版本ID", "模型信息")
     FUNCTION = "select_model"
-    CATEGORY = "Replicate"
+    CATEGORY = "Replicate/复刻"
 
-    def select_model(self, model_preset: str, search_query: str, api_token: str, refresh: bool,
-                    limit: int = 50) -> Tuple[str, str, str, Dict[str, Any]]:
-        """Select a model from Replicate"""
+    def select_model(self, 模型预设: str, 搜索关键词: str, API密钥: str, 刷新缓存: bool,
+                    搜索数量: int = 50) -> Tuple[str, str, str, Dict[str, Any]]:
+        """选择 Replicate 模型"""
         try:
-            # Use provided token or load saved token
-            token = api_token if api_token else load_api_token()
+            # 使用提供的 token 或加载保存的 token
+            token = API密钥 if API密钥 else load_api_token()
             if not token:
-                raise ValueError("No API token provided. Please provide a token or save one first.")
+                raise ValueError("未提供 API 密钥。请提供密钥或先保存一个密钥。")
 
-            # Run async operation in thread
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+            # 获取或创建事件循环
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
 
             async def _get_models():
                 async with ReplicateClient(token) as client:
-                    if refresh:
+                    if 刷新缓存:
                         client.clear_cache()
 
                     # 判断是使用预设模型还是搜索
-                    if model_preset != "Custom (use search)":
+                    if 模型预设 != "自定义(使用搜索)":
                         # 使用预设模型
-                        logger.info(f"使用预设模型: {model_preset}")
-                        owner, name = model_preset.split('/')
+                        logger.info(f"使用预设模型: {模型预设}")
+                        owner, name = 模型预设.split('/')
 
                         # 直接获取模型详情
                         details = await client.get_model_details(owner, name)
@@ -103,9 +115,9 @@ class ReplicateModelSelector:
 
                     else:
                         # 使用搜索功能
-                        logger.info(f"使用搜索: {search_query}")
-                        models = await client.list_models(search=search_query if search_query else None,
-                                                        limit=limit)
+                        logger.info(f"使用搜索: {搜索关键词}")
+                        models = await client.list_models(search=搜索关键词 if 搜索关键词 else None,
+                                                        limit=搜索数量)
 
                         if not models:
                             return None, None, None, {}
@@ -139,11 +151,17 @@ class ReplicateModelSelector:
                            f"{selected_model.owner}/{selected_model.name}", \
                            version_id or "", model_info
 
+            # 使用 nest_asyncio 支持的方式运行
             model_id, model_name, model_version, model_info = loop.run_until_complete(_get_models())
-            loop.close()
+
+            # 只在我们创建了新循环时才关闭
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                loop.close()
 
             if not model_id:
-                raise ValueError("No models found")
+                raise ValueError("未找到模型")
 
             return model_id, model_name, model_version, model_info
 
@@ -152,7 +170,7 @@ class ReplicateModelSelector:
             raise RuntimeError(error_msg)
 
 class ReplicateDynamicNode:
-    """Dynamic node that creates inputs based on model schema"""
+    """动态参数节点"""
 
     # Class-level schema cache to avoid repeated API calls
     _schema_cache: Dict[str, Dict[str, Any]] = {}
@@ -161,30 +179,30 @@ class ReplicateDynamicNode:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "model_info": ("DICT", {}),
-                "model_version": ("STRING", {"default": ""}),
-                "api_token": ("STRING", {
+                "模型信息": ("DICT", {}),
+                "版本ID": ("STRING", {"default": ""}),
+                "API密钥": ("STRING", {
                     "default": "",
                     "multiline": False,
-                    "placeholder": "Replicate API token (leave empty to use saved token)"
+                    "placeholder": "留空则使用已保存的密钥"
                 }),
-                "prompt_text": ("STRING", {
+                "提示词": ("STRING", {
                     "default": "",
                     "multiline": True,
-                    "placeholder": "请输入提示词"
+                    "placeholder": "在此输入提示词"
                 }),
             },
             "optional": {
-                "primary_image": ("IMAGE",),  # ComfyUI IMAGE type (torch.Tensor [B,H,W,C] in 0-1 range)
-                "secondary_image": ("IMAGE",),
-                "tertiary_image": ("IMAGE",),
-                "quaternary_image": ("IMAGE",),
-                "param_overrides_json": ("STRING", {
+                "图像1": ("IMAGE",),
+                "图像2": ("IMAGE",),
+                "图像3": ("IMAGE",),
+                "图像4": ("IMAGE",),
+                "参数覆盖JSON": ("STRING", {
                     "default": "{}",
                     "multiline": True,
-                    "placeholder": "JSON 格式的额外参数，例如 {\"guidance_scale\": 7.5}"
+                    "placeholder": "JSON格式的额外参数,例如 {\"guidance_scale\": 7.5}"
                 }),
-                "param_overrides": ("DICT", {}),
+                "参数覆盖": ("DICT", {}),
             },
             "hidden": {
                 "prompt": "PROMPT",
@@ -193,32 +211,32 @@ class ReplicateDynamicNode:
             }
         }
 
-    RETURN_TYPES = ("DICT", "DICT")  # Prepared inputs, schema summary
-    RETURN_NAMES = ("prepared_inputs", "schema_summary")
+    RETURN_TYPES = ("DICT", "DICT")
+    RETURN_NAMES = ("准备好的输入", "参数摘要")
     FUNCTION = "prepare_inputs"
-    CATEGORY = "Replicate"
+    CATEGORY = "Replicate/复刻"
     OUTPUT_NODE = False
 
-    def prepare_inputs(self, model_info: Dict[str, Any], model_version: str,
-                      api_token: str, prompt_text: str,
-                      primary_image: Any = None, secondary_image: Any = None,
-                      tertiary_image: Any = None, quaternary_image: Any = None,
-                      param_overrides_json: str = "{}", param_overrides: Optional[Dict[str, Any]] = None,
+    def prepare_inputs(self, 模型信息: Dict[str, Any], 版本ID: str,
+                      API密钥: str, 提示词: str,
+                      图像1: Any = None, 图像2: Any = None,
+                      图像3: Any = None, 图像4: Any = None,
+                      参数覆盖JSON: str = "{}", 参数覆盖: Optional[Dict[str, Any]] = None,
                       prompt: Dict = None, extra_pnginfo: Dict = None,
                       unique_id: str = None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        """Prepare inputs based on model schema"""
+        """根据模型 Schema 准备输入参数"""
         try:
-            if not model_info or not model_version:
-                raise ValueError("No model selected or version available")
+            if not 模型信息 or not 版本ID:
+                raise ValueError("未选择模型或版本不可用")
 
             # Use provided token or load saved token
-            token = api_token if api_token else load_api_token()
+            token = API密钥 if API密钥 else load_api_token()
             if not token:
-                raise ValueError("No API token provided")
+                raise ValueError("未提供 API 密钥")
 
-            owner = model_info.get('owner')
-            name = model_info.get('name')
-            version_id = model_version or model_info.get('version_id')
+            owner = 模型信息.get('owner')
+            name = 模型信息.get('name')
+            version_id = 版本ID or 模型信息.get('version_id')
 
             if not owner or not name:
                 raise ValueError("模型信息缺少 owner/name 字段")
@@ -227,8 +245,8 @@ class ReplicateDynamicNode:
             schema: Dict[str, Any] = {}
             resolved_version_id = version_id
 
-            schema_from_model_info = model_info.get("schema")
-            schema_version_id = model_info.get("schema_version_id") or model_info.get("version_id")
+            schema_from_model_info = 模型信息.get("schema")
+            schema_version_id = 模型信息.get("schema_version_id") or 模型信息.get("version_id")
 
             # 尝试从类级缓存获取
             cache_key = f"{owner}/{name}@{version_id or 'latest'}"
@@ -241,8 +259,11 @@ class ReplicateDynamicNode:
                 # 缓存到类级缓存
                 self._schema_cache[cache_key] = {'schema': schema, 'version_id': resolved_version_id}
             else:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
 
                 async def _fetch_schema():
                     async with ReplicateClient(token) as client:
@@ -259,28 +280,32 @@ class ReplicateDynamicNode:
                     # 缓存获取到的 schema
                     self._schema_cache[cache_key] = {'schema': schema, 'version_id': resolved_version_id}
                 finally:
-                    loop.close()
+                    # 只在我们创建了新循环时才关闭
+                    try:
+                        asyncio.get_running_loop()
+                    except RuntimeError:
+                        loop.close()
 
-            if not model_version and resolved_version_id:
-                model_version = resolved_version_id
+            if not 版本ID and resolved_version_id:
+                版本ID = resolved_version_id
 
             if not schema:
                 logger.warning("模型 %s/%s 缺少输入 Schema，返回空输入", owner, name)
-                empty_summary = self._build_schema_summary({}, model_version)
+                empty_summary = self._build_schema_summary({}, 版本ID)
                 return ({}, empty_summary)
 
-            schema_summary = self._build_schema_summary(schema, model_version or resolved_version_id)
+            schema_summary = self._build_schema_summary(schema, 版本ID or resolved_version_id)
 
             # 解析 JSON overrides
             overrides_raw: Dict[str, Any] = {}
-            if param_overrides_json and param_overrides_json.strip():
+            if 参数覆盖JSON and 参数覆盖JSON.strip():
                 try:
-                    overrides_raw.update(json.loads(param_overrides_json))
+                    overrides_raw.update(json.loads(参数覆盖JSON))
                 except (ValueError, TypeError) as json_error:
                     raise ValueError(f"参数 JSON 解析失败: {json_error}") from json_error
 
-            if isinstance(param_overrides, dict):
-                overrides_raw.update(param_overrides)
+            if isinstance(参数覆盖, dict):
+                overrides_raw.update(参数覆盖)
 
             # 来自节点 UI 的当前输入（例如 prompt_text）
             current_values = {}
@@ -289,7 +314,7 @@ class ReplicateDynamicNode:
 
             # 准备图片输入队列
             image_queue = []
-            for idx, img in enumerate((primary_image, secondary_image, tertiary_image, quaternary_image), 1):
+            for idx, img in enumerate((图像1, 图像2, 图像3, 图像4), 1):
                 if img is not None:
                     try:
                         processed_img = self._process_image_input(img, prompt)
@@ -348,7 +373,7 @@ class ReplicateDynamicNode:
 
                 # 3. 提示词相关参数
                 if self._is_prompt_parameter(param_name, param_config):
-                    value = prompt_text or current_values.get(param_name)
+                    value = 提示词 or current_values.get(param_name)
                     if value:
                         prepared_inputs[param_name] = str(value)
                         continue
@@ -447,80 +472,83 @@ class ReplicateDynamicNode:
         return summary
 
     @classmethod
-    def IS_CHANGED(cls, model_info: Dict[str, Any], model_version: str,
-                   api_token: str, prompt_text: str = "",
-                   primary_image: Any = None, secondary_image: Any = None,
-                   tertiary_image: Any = None, quaternary_image: Any = None,
-                   param_overrides_json: str = "{}", param_overrides: Optional[Dict[str, Any]] = None,
+    def IS_CHANGED(cls, 模型信息: Dict[str, Any], 版本ID: str,
+                   API密钥: str, 提示词: str = "",
+                   图像1: Any = None, 图像2: Any = None,
+                   图像3: Any = None, 图像4: Any = None,
+                   参数覆盖JSON: str = "{}", 参数覆盖: Optional[Dict[str, Any]] = None,
                    **kwargs):
         """Check if node inputs have changed"""
         return hash((
-            str(model_info),
-            model_version,
-            api_token,
-            prompt_text,
-            param_overrides_json,
-            str(param_overrides)
+            str(模型信息),
+            版本ID,
+            API密钥,
+            提示词,
+            参数覆盖JSON,
+            str(参数覆盖)
         ))
 
 class ReplicatePrediction:
-    """Node for executing Replicate predictions"""
+    """预测执行节点"""
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "model_version": ("STRING", {"default": ""}),
-                "prepared_inputs": ("DICT", {}),
-                "api_token": ("STRING", {
+                "版本ID": ("STRING", {"default": ""}),
+                "准备好的输入": ("DICT", {}),
+                "API密钥": ("STRING", {
                     "default": "",
                     "multiline": False,
-                    "placeholder": "Replicate API token (leave empty to use saved token)"
+                    "placeholder": "留空则使用已保存的密钥"
                 }),
-                "timeout": ("INT", {"default": 300, "min": 10, "max": 1800}),
-                "poll_interval": ("INT", {"default": 2, "min": 1, "max": 10}),
+                "超时时间": ("INT", {"default": 300, "min": 10, "max": 1800}),
+                "轮询间隔": ("INT", {"default": 2, "min": 1, "max": 10}),
             },
             "optional": {
-                "webhook_url": ("STRING", {
+                "回调地址": ("STRING", {
                     "default": "",
                     "multiline": False,
-                    "placeholder": "Optional webhook URL for notifications"
+                    "placeholder": "可选的 Webhook 回调地址"
                 }),
             }
         }
 
-    RETURN_TYPES = ("STRING", "STRING", "DICT")  # prediction_id, status, results
-    RETURN_NAMES = ("prediction_id", "status", "results")
+    RETURN_TYPES = ("STRING", "STRING", "DICT")
+    RETURN_NAMES = ("预测ID", "状态", "结果")
     FUNCTION = "run_prediction"
-    CATEGORY = "Replicate"
+    CATEGORY = "Replicate/复刻"
     OUTPUT_NODE = True
 
-    def run_prediction(self, model_version: str, prepared_inputs: Dict[str, Any],
-                      api_token: str, timeout: int = 300, poll_interval: int = 2,
-                      webhook_url: str = "") -> Tuple[str, str, Dict[str, Any]]:
-        """Run prediction on Replicate"""
+    def run_prediction(self, 版本ID: str, 准备好的输入: Dict[str, Any],
+                      API密钥: str, 超时时间: int = 300, 轮询间隔: int = 2,
+                      回调地址: str = "") -> Tuple[str, str, Dict[str, Any]]:
+        """在 Replicate 上运行预测"""
         try:
-            if not model_version:
-                raise ValueError("No model version provided")
-            if not prepared_inputs:
-                raise ValueError("No inputs prepared")
+            if not 版本ID:
+                raise ValueError("未提供模型版本")
+            if not 准备好的输入:
+                raise ValueError("未准备输入参数")
 
             # Use provided token or load saved token
-            token = api_token if api_token else load_api_token()
+            token = API密钥 if API密钥 else load_api_token()
             if not token:
-                raise ValueError("No API token provided")
+                raise ValueError("未提供 API 密钥")
 
-            # Run async operation in thread
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+            # 获取或创建事件循环
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
 
             async def _run_prediction():
                 async with ReplicateClient(token) as client:
                     # Create prediction
                     prediction = await client.create_prediction(
-                        version_id=model_version,
-                        inputs=prepared_inputs,
-                        webhook=webhook_url if webhook_url else None
+                        version_id=版本ID,
+                        inputs=准备好的输入,
+                        webhook=回调地址 if 回调地址 else None
                     )
 
                     logger.info(f"Created prediction: {prediction.id}")
@@ -529,8 +557,8 @@ class ReplicatePrediction:
                     try:
                         result = await client.wait_for_prediction(
                             prediction_id=prediction.id,
-                            timeout=timeout,
-                            poll_interval=poll_interval
+                            timeout=超时时间,
+                            poll_interval=轮询间隔
                         )
 
                         if result.status == 'succeeded':
@@ -542,20 +570,25 @@ class ReplicatePrediction:
                                 'completed_at': result.completed_at
                             }
                         elif result.status == 'failed':
-                            error_msg = result.error or "Prediction failed"
-                            raise RuntimeError(f"Prediction failed: {error_msg}")
+                            error_msg = result.error or "预测失败"
+                            raise RuntimeError(f"预测失败: {error_msg}")
                         elif result.status == 'canceled':
-                            raise RuntimeError("Prediction was canceled")
+                            raise RuntimeError("预测已取消")
                         else:
-                            raise RuntimeError(f"Unexpected prediction status: {result.status}")
+                            raise RuntimeError(f"未知的预测状态: {result.status}")
 
                     except TimeoutError:
                         # Cancel the prediction
                         await client.cancel_prediction(prediction.id)
-                        raise RuntimeError(f"Prediction timed out after {timeout} seconds")
+                        raise RuntimeError(f"预测超时 ({超时时间} 秒)")
 
             prediction_id, status, results = loop.run_until_complete(_run_prediction())
-            loop.close()
+
+            # 只在我们创建了新循环时才关闭
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                loop.close()
 
             return prediction_id, status, results
 
@@ -564,84 +597,96 @@ class ReplicatePrediction:
             raise RuntimeError(error_msg)
 
 class ReplicateConfig:
-    """Node for configuring Replicate API token"""
+    """配置节点"""
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "api_token": ("STRING", {
+                "API密钥": ("STRING", {
                     "default": "",
                     "multiline": False,
                     "password": True,
-                    "placeholder": "Enter your Replicate API token"
+                    "placeholder": "输入你的 Replicate API 密钥"
                 }),
-                "save_token": ("BOOLEAN", {"default": True}),
-                "test_connection": ("BOOLEAN", {"default": False}),
+                "保存密钥": ("BOOLEAN", {"default": True}),
+                "测试连接": ("BOOLEAN", {"default": False}),
             }
         }
 
-    RETURN_TYPES = ("STRING", "BOOLEAN")  # status, success
-    RETURN_NAMES = ("status", "success")
+    RETURN_TYPES = ("STRING", "BOOLEAN")
+    RETURN_NAMES = ("状态", "成功")
     FUNCTION = "configure_token"
-    CATEGORY = "Replicate"
+    CATEGORY = "Replicate/复刻"
     OUTPUT_NODE = True
 
-    def configure_token(self, api_token: str, save_token: bool, test_connection: bool) -> Tuple[str, bool]:
-        """Configure and optionally test Replicate API token"""
+    def configure_token(self, API密钥: str, 保存密钥: bool, 测试连接: bool) -> Tuple[str, bool]:
+        """配置并测试 Replicate API 密钥"""
         try:
-            if not api_token:
-                return ("No token provided", False)
+            if not API密钥:
+                return ("未提供密钥", False)
 
             # Test connection if requested
-            if test_connection:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
+            if 测试连接:
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
 
                 async def _test_connection():
-                    async with ReplicateClient(api_token) as client:
+                    async with ReplicateClient(API密钥) as client:
                         # Try to list models to test connection
                         await client.list_models(limit=1)
                         return True
 
                 try:
                     success = loop.run_until_complete(_test_connection())
-                    loop.close()
+
+                    # 只在我们创建了新循环时才关闭
+                    try:
+                        asyncio.get_running_loop()
+                    except RuntimeError:
+                        loop.close()
+
                     if not success:
-                        return ("Connection test failed", False)
+                        return ("连接测试失败", False)
                 except Exception as e:
-                    loop.close()
-                    return (f"Connection test failed: {format_error_message(e)}", False)
+                    try:
+                        asyncio.get_running_loop()
+                    except RuntimeError:
+                        loop.close()
+                    return (f"连接测试失败: {format_error_message(e)}", False)
 
             # Save token if requested
-            if save_token:
-                save_api_token(api_token)
+            if 保存密钥:
+                save_api_token(API密钥)
 
-            return ("API token configured successfully", True)
+            return ("API 密钥配置成功", True)
 
         except Exception as e:
             error_msg = format_error_message(e)
             return (error_msg, False)
 
 class ReplicateOutputProcessor:
-    """Node for processing Replicate prediction outputs"""
+    """输出处理节点"""
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "results": ("DICT", {}),
+                "结果": ("DICT", {}),
             }
         }
 
-    RETURN_TYPES = ("IMAGE", "STRING", "STRING")  # image, text, raw_output
-    RETURN_NAMES = ("image", "text", "raw_output")
+    RETURN_TYPES = ("IMAGE", "STRING", "STRING")
+    RETURN_NAMES = ("图像", "文本", "原始输出")
     FUNCTION = "process_output"
-    CATEGORY = "Replicate"
+    CATEGORY = "Replicate/复刻"
     OUTPUT_NODE = False
 
-    def process_output(self, results: Dict[str, Any]) -> Tuple[Any, str, str]:
-        """Process Replicate prediction output"""
+    def process_output(self, 结果: Dict[str, Any]) -> Tuple[Any, str, str]:
+        """处理 Replicate 预测输出"""
         try:
             import torch
             import requests
@@ -649,9 +694,9 @@ class ReplicateOutputProcessor:
         except ImportError as e:
             raise RuntimeError(f"缺少必要的依赖: {e}")
 
-        output = results.get('output')
+        output = 结果.get('output')
         if not output:
-            return (None, "", json.dumps(results, indent=2))
+            return (None, "", json.dumps(结果, indent=2))
 
         # 处理不同类型的输出
         image_tensor = None
@@ -707,9 +752,9 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "ReplicateModelSelector": "Replicate Model Selector",
-    "ReplicateDynamicNode": "Replicate Dynamic Node",
-    "ReplicatePrediction": "Replicate Prediction",
-    "ReplicateConfig": "Replicate Config",
-    "ReplicateOutputProcessor": "Replicate Output Processor",
+    "ReplicateModelSelector": "Replicate 模型选择器",
+    "ReplicateDynamicNode": "Replicate 动态参数",
+    "ReplicatePrediction": "Replicate 预测执行",
+    "ReplicateConfig": "Replicate 配置",
+    "ReplicateOutputProcessor": "Replicate 输出处理",
 }
