@@ -20,6 +20,16 @@ from .utils import (
 
 logger = logging.getLogger(__name__)
 
+try:
+    import nest_asyncio
+
+    nest_asyncio.apply()
+except ImportError:
+    logger.warning(
+        "未检测到 nest_asyncio，某些环境下可能出现事件循环冲突。"
+        "若遇到 'event loop is already running'，请安装 nest_asyncio。"
+    )
+
 
 class ReplicateModelNodeBase:
     """Base implementation for model-specific Replicate nodes."""
