@@ -226,8 +226,8 @@ class ReplicateDynamicNode:
                       unique_id: str = None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """根据模型 Schema 准备输入参数"""
         try:
-            if not 模型信息 or not 版本ID:
-                raise ValueError("未选择模型或版本不可用")
+            if not 模型信息:
+                raise ValueError("未选择模型")
 
             # Use provided token or load saved token
             token = API密钥 if API密钥 else load_api_token()

@@ -69,14 +69,22 @@ def convert_image_to_base64(image: Union[Image.Image, np.ndarray]) -> str:
         elif image.dtype != np.uint8:
             image = (image * 255).astype(np.uint8)
 
+        # Handle batch dimension (4D: [B, H, W, C])
+        if image.ndim == 4:
+            # Take first image from batch
+            image = image[0]
+
         if len(image.shape) == 3 and image.shape[2] == 3:
             # RGB image
             pil_image = Image.fromarray(image, 'RGB')
         elif len(image.shape) == 3 and image.shape[2] == 4:
             # RGBA image
             pil_image = Image.fromarray(image, 'RGBA')
+        elif len(image.shape) == 2:
+            # Grayscale image (2D: [H, W])
+            pil_image = Image.fromarray(image, 'L')
         else:
-            # Grayscale image
+            # Fallback: try to squeeze and convert to grayscale
             pil_image = Image.fromarray(image.squeeze(), 'L')
     else:
         pil_image = image
