@@ -13,6 +13,113 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
+def _load_image_from_string(data: str) -> Optional[Image.Image]:
+    """Decode image from URL or base64 string."""
+    if not isinstance(data, str):
+        return None
+
+    try:
+        if data.startswith(("http://", "https://")):
+            import requests
+
+            response = requests.get(data, timeout=30)
+            response.raise_for_status()
+            return Image.open(io.BytesIO(response.content))
+
+        if data.startswith("data:image"):
+            header, _, b64_data = data.partition(",")
+            if ";base64" not in header:
+                return None
+            decoded = base64.b64decode(b64_data)
+            return Image.open(io.BytesIO(decoded))
+    except Exception as exc:
+        logger.warning("Failed to load image source: %s", exc)
+        return None
+
+    # Try raw base64 without prefix
+    try:
+        decoded = base64.b64decode(data)
+        return Image.open(io.BytesIO(decoded))
+    except Exception:
+        return None
+
+
+def convert_image_batch_to_base64_list(
+    images: Any,
+    limit: Optional[int] = None,
+) -> List[str]:
+    """Convert batched images to base64 data URI strings."""
+    if images is None:
+        return []
+
+    encoded: List[str] = []
+
+    try:
+        import torch  # type: ignore
+    except ImportError:
+        torch = None  # type: ignore
+
+    if torch is not None and isinstance(images, torch.Tensor):
+        tensor = images.detach().cpu()
+        if tensor.ndim == 3:
+            tensor = tensor.unsqueeze(0)
+        max_count = tensor.shape[0]
+        if limit is not None:
+            max_count = min(max_count, limit)
+        for idx in range(max_count):
+            encoded.append(convert_image_to_base64(tensor[idx : idx + 1]))
+        return encoded
+
+    if isinstance(images, list):
+        items = images if limit is None else images[:limit]
+        for item in items:
+            encoded.append(convert_image_to_base64(item))
+        return encoded
+
+    encoded.append(convert_image_to_base64(images))
+    return encoded
+
+
+def parse_replicate_outputs(output: Any) -> tuple[List[np.ndarray], List[str]]:
+    """Parse Replicate outputs into image arrays (float32 0-1) and text fragments."""
+    image_arrays: List[np.ndarray] = []
+    text_parts: List[str] = []
+
+    entries = output if isinstance(output, list) else [output]
+
+    for entry in entries:
+        if isinstance(entry, str):
+            image = _load_image_from_string(entry)
+            if image:
+                image = image.convert("RGB")
+                arr = np.array(image).astype(np.float32) / 255.0
+                image_arrays.append(arr)
+            else:
+                text_parts.append(entry)
+        elif entry is not None:
+            try:
+                text_parts.append(json.dumps(entry, ensure_ascii=False))
+            except TypeError:
+                text_parts.append(str(entry))
+
+    return image_arrays, text_parts
+
+
+def stack_image_arrays(arrays: List[np.ndarray]):
+    """Stack image arrays into a torch tensor."""
+    if not arrays:
+        return None
+
+    try:
+        import torch  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError("torch is required to process images") from exc
+
+    stacked = np.stack(arrays, axis=0).astype(np.float32)
+    return torch.from_numpy(stacked)
+
+
 def load_api_token() -> Optional[str]:
     """Load Replicate API token from environment variables or config file"""
     # Try environment variable first

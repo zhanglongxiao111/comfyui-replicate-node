@@ -1,760 +1,687 @@
 """
 ComfyUI Replicate Nodes
-Core node implementations for Replicate integration
+Model-specific nodes for Replicate integration
 """
 
 import asyncio
 import json
 import logging
-from typing import Dict, Any, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
-import numpy as np
-from PIL import Image
-
-# 导入 nest_asyncio 以支持嵌套事件循环
-try:
-    import nest_asyncio
-    nest_asyncio.apply()
-except ImportError:
-    nest_asyncio = None
-    logger = logging.getLogger(__name__)
-    logger.warning("nest_asyncio not installed. Some async operations may fail. Install with: pip install nest-asyncio")
-
-from .replicate_client import ReplicateClient, ModelInfo, PredictionStatus
+from .replicate_client import ReplicateClient
 from .utils import (
-    load_api_token, save_api_token, convert_image_to_base64,
-    format_model_display_name, extract_model_schema, get_parameter_type,
-    get_parameter_options, is_image_parameter, sanitize_inputs,
-    format_error_message
+    convert_image_batch_to_base64_list,
+    format_error_message,
+    load_api_token,
+    parse_replicate_outputs,
+    save_api_token,
+    stack_image_arrays,
 )
 
 logger = logging.getLogger(__name__)
 
-class ReplicateModelSelector:
-    """模型选择节点"""
 
-    # 预设的推荐模型列表
-    PRESET_MODELS = [
-        "google/nano-banana",  # Gemini 2.5 Flash Image
-        "qwen/qwen-image-edit",  # Qwen Image Edit
-        "stability-ai/sdxl",  # Stable Diffusion XL
-        "black-forest-labs/flux-schnell",  # FLUX Schnell
-        "自定义(使用搜索)"  # 自定义搜索选项
-    ]
+class ReplicateModelNodeBase:
+    """Base implementation for model-specific Replicate nodes."""
+
+    MODEL_OWNER: str = ""
+    MODEL_NAME: str = ""
+    SUPPORTS_NATIVE_BATCH: bool = False
+    REQUIRE_IMAGE: bool = False
+    MAX_REFERENCE_IMAGES: Optional[int] = None
+    MAX_IMAGES: int = 5
+    REQUEST_TIMEOUT: int = 300
+    POLL_INTERVAL: int = 2
+
+    _version_cache: Dict[str, str] = {}
 
     @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "模型预设": (cls.PRESET_MODELS, {
-                    "default": "google/nano-banana"
-                }),
-                "搜索关键词": ("STRING", {
-                    "default": "",
-                    "multiline": False,
-                    "placeholder": "仅在选择'自定义'时使用"
-                }),
-                "API密钥": ("STRING", {
-                    "default": "",
-                    "multiline": False,
-                    "placeholder": "留空则使用已保存的密钥"
-                }),
-                "刷新缓存": ("BOOLEAN", {"default": False}),
-            },
-            "optional": {
-                "搜索数量": ("INT", {"default": 50, "min": 1, "max": 100}),
-            }
-        }
+    def _model_key(cls) -> str:
+        return f"{cls.MODEL_OWNER}/{cls.MODEL_NAME}"
 
-    RETURN_TYPES = ("STRING", "STRING", "STRING", "DICT")
-    RETURN_NAMES = ("模型ID", "模型名称", "版本ID", "模型信息")
-    FUNCTION = "select_model"
-    CATEGORY = "Replicate/复刻"
+    @classmethod
+    async def _get_latest_version_id(cls, client: ReplicateClient) -> str:
+        cache_key = cls._model_key()
+        if cache_key in cls._version_cache:
+            return cls._version_cache[cache_key]
 
-    def select_model(self, 模型预设: str, 搜索关键词: str, API密钥: str, 刷新缓存: bool,
-                    搜索数量: int = 50) -> Tuple[str, str, str, Dict[str, Any]]:
-        """选择 Replicate 模型"""
+        details = await client.get_model_details(cls.MODEL_OWNER, cls.MODEL_NAME)
+        version_info = details.get("latest_version", {}) if details else {}
+        version_id = version_info.get("id")
+        if not version_id:
+            raise RuntimeError(f"无法获取 {cache_key} 的最新版本 ID")
+
+        cls._version_cache[cache_key] = version_id
+        return version_id
+
+    @staticmethod
+    def _resolve_string(manual_value: str, port_value: Optional[str]) -> str:
+        if isinstance(port_value, str) and port_value.strip():
+            return port_value
+        return manual_value
+
+    def _resolve_token(self, manual_token: str, port_token: Optional[str]) -> str:
+        token = self._resolve_string(manual_token, port_token)
+        if not token:
+            token = load_api_token()
+        if not token:
+            raise RuntimeError("未找到可用的 Replicate API 密钥")
+        return token
+
+    def _resolve_count(self, manual_count: int, port_count: Optional[int]) -> int:
+        if isinstance(port_count, int) and port_count > 0:
+            candidate = port_count
+        else:
+            candidate = manual_count
+        candidate = max(1, candidate)
+        candidate = min(candidate, self.MAX_IMAGES)
+        return candidate
+
+    def _prepare_images(self, image_batch: Any) -> List[str]:
+        images = convert_image_batch_to_base64_list(image_batch, self.MAX_REFERENCE_IMAGES)
+        if self.REQUIRE_IMAGE and not images:
+            raise ValueError("请提供至少一张输入图片")
+        return images
+
+    async def _create_and_wait(
+        self,
+        client: ReplicateClient,
+        version_id: str,
+        inputs: Dict[str, Any],
+    ):
+        prediction = await client.create_prediction(
+            version_id=version_id,
+            inputs=inputs,
+        )
+        result = await client.wait_for_prediction(
+            prediction_id=prediction.id,
+            timeout=self.REQUEST_TIMEOUT,
+            poll_interval=self.POLL_INTERVAL,
+        )
+        if result.status != "succeeded":
+            error_message = result.error or f"预测状态: {result.status}"
+            raise RuntimeError(error_message)
+        return prediction, result
+
+    async def _run_prediction_batch(
+        self,
+        client: ReplicateClient,
+        payload: Dict[str, Any],
+        desired_count: int,
+    ):
+        version_id = await self._get_latest_version_id(client)
+
+        images: List[Any] = []
+        text_parts: List[str] = []
+        raw_records: List[Dict[str, Any]] = []
+        iteration = 0
+
+        while len(images) < desired_count:
+            iteration += 1
+            request_count = desired_count if self.SUPPORTS_NATIVE_BATCH and iteration == 1 else 1
+            request_inputs = self._prepare_request_payload(payload, request_count, iteration)
+
+            prediction, result = await self._create_and_wait(
+                client,
+                version_id,
+                request_inputs,
+            )
+
+            raw_records.append(
+                {
+                    "prediction_id": prediction.id,
+                    "inputs": request_inputs,
+                    "output": result.output,
+                    "logs": result.logs,
+                    "status": result.status,
+                }
+            )
+
+            image_arrays, texts = parse_replicate_outputs(result.output)
+            if image_arrays:
+                images.extend(image_arrays)
+            if texts:
+                text_parts.extend(texts)
+            if result.logs:
+                text_parts.append(result.logs)
+
+            if self.SUPPORTS_NATIVE_BATCH:
+                break
+
+            if iteration >= desired_count:
+                break
+
+            if not image_arrays:
+                raise RuntimeError("模型未返回图像输出，请检查输入参数")
+
+        if not images:
+            raise RuntimeError("模型未返回可用图像")
+
+        return images[:desired_count], text_parts, raw_records
+
+    def _prepare_request_payload(
+        self,
+        payload: Dict[str, Any],
+        requested_count: int,
+        iteration: int,
+    ) -> Dict[str, Any]:
+        return dict(payload)
+
+    async def _async_predict(
+        self,
+        token: str,
+        payload: Dict[str, Any],
+        desired_count: int,
+    ):
+        async with ReplicateClient(token) as client:
+            return await self._run_prediction_batch(client, payload, desired_count)
+
+    def _execute_predictions(
+        self,
+        token: str,
+        payload: Dict[str, Any],
+        desired_count: int,
+    ):
+        created_loop = False
         try:
-            # 使用提供的 token 或加载保存的 token
-            token = API密钥 if API密钥 else load_api_token()
-            if not token:
-                raise ValueError("未提供 API 密钥。请提供密钥或先保存一个密钥。")
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            created_loop = True
 
-            # 获取或创建事件循环
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-
-            async def _get_models():
-                async with ReplicateClient(token) as client:
-                    if 刷新缓存:
-                        client.clear_cache()
-
-                    # 判断是使用预设模型还是搜索
-                    if 模型预设 != "自定义(使用搜索)":
-                        # 使用预设模型
-                        logger.info(f"使用预设模型: {模型预设}")
-                        owner, name = 模型预设.split('/')
-
-                        # 直接获取模型详情
-                        details = await client.get_model_details(owner, name)
-
-                        # 构造模型信息(类似list_models返回的格式)
-                        class PresetModel:
-                            def __init__(self, owner, name, details):
-                                self.owner = owner
-                                self.name = name
-                                self.description = details.get('description', '')
-                                self.visibility = details.get('visibility', 'public')
-                                self.url = details.get('url', '')
-                                self.latest_version = details.get('latest_version')
-
-                        selected_model = PresetModel(owner, name, details)
-
-                    else:
-                        # 使用搜索功能
-                        logger.info(f"使用搜索: {搜索关键词}")
-                        models = await client.list_models(search=搜索关键词 if 搜索关键词 else None,
-                                                        limit=搜索数量)
-
-                        if not models:
-                            return None, None, None, {}
-
-                        # 选择第一个搜索结果
-                        selected_model = models[0]
-
-                    # Get model details
-                    details = await client.get_model_details(selected_model.owner, selected_model.name)
-
-                    # Get latest version
-                    version_id = None
-                    version_schema: Dict[str, Any] = {}
-                    if selected_model.latest_version:
-                        version_id = selected_model.latest_version.get('id')
-                        version_schema = extract_model_schema(selected_model.latest_version)
-
-                    model_info = {
-                        'owner': selected_model.owner,
-                        'name': selected_model.name,
-                        'description': selected_model.description,
-                        'visibility': selected_model.visibility,
-                        'url': selected_model.url,
-                        'details': details,
-                        'version_id': version_id,
-                        'schema': version_schema,
-                        'schema_version_id': version_id
-                    }
-
-                    return f"{selected_model.owner}/{selected_model.name}", \
-                           f"{selected_model.owner}/{selected_model.name}", \
-                           version_id or "", model_info
-
-            # 使用 nest_asyncio 支持的方式运行
-            model_id, model_name, model_version, model_info = loop.run_until_complete(_get_models())
-
-            # 只在我们创建了新循环时才关闭
-            try:
-                asyncio.get_running_loop()
-            except RuntimeError:
+        try:
+            return loop.run_until_complete(
+                self._async_predict(token, payload, desired_count)
+            )
+        finally:
+            if created_loop:
                 loop.close()
 
-            if not model_id:
-                raise ValueError("未找到模型")
+    def _build_payload(
+        self,
+        prompt: str,
+        image_inputs: List[str],
+        params: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        raise NotImplementedError
 
-            return model_id, model_name, model_version, model_info
+    def predict(self, **kwargs):
+        try:
+            prompt = self._resolve_string(
+                kwargs.get("提示词", ""),
+                kwargs.get("提示词输入"),
+            )
+            if not prompt or not prompt.strip():
+                raise ValueError("提示词不能为空")
 
-        except Exception as e:
-            error_msg = format_error_message(e)
-            raise RuntimeError(error_msg)
+            token = self._resolve_token(
+                kwargs.get("API密钥", ""),
+                kwargs.get("API密钥输入"),
+            )
+            desired_count = self._resolve_count(
+                kwargs.get("生成数量", 1),
+                kwargs.get("数量输入"),
+            )
 
-class ReplicateDynamicNode:
-    """动态参数节点"""
+            image_inputs = self._prepare_images(kwargs.get("输入图片"))
+            payload = self._build_payload(prompt, image_inputs, kwargs)
 
-    # Class-level schema cache to avoid repeated API calls
-    _schema_cache: Dict[str, Dict[str, Any]] = {}
+            image_arrays, text_parts, raw_records = self._execute_predictions(
+                token,
+                payload,
+                desired_count,
+            )
+
+            image_tensor = stack_image_arrays(image_arrays)
+            text_output = "\n".join(part for part in text_parts if part).strip()
+            raw_output = json.dumps(raw_records, ensure_ascii=False, indent=2)
+
+            return (image_tensor, text_output, raw_output)
+
+        except Exception as exc:
+            raise RuntimeError(format_error_message(exc))
+
+
+class ReplicateQwenImageEditPlus(ReplicateModelNodeBase):
+    MODEL_OWNER = "qwen"
+    MODEL_NAME = "qwen-image-edit-plus"
+    REQUIRE_IMAGE = True
+    MAX_REFERENCE_IMAGES = 4
+    DESCRIPTION = "图像编辑：根据中文提示修改输入图片，支持多图批量生成。"
+    CATEGORY = "Replicate/图像"
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "模型信息": ("DICT", {}),
-                "版本ID": ("STRING", {"default": ""}),
                 "API密钥": ("STRING", {
                     "default": "",
-                    "multiline": False,
-                    "placeholder": "留空则使用已保存的密钥"
+                    "password": True,
+                    "placeholder": "留空使用已保存的密钥",
+                    "tooltip": "用于访问 Replicate 服务的 API 密钥，可通过端口输入或自动读取配置。"
                 }),
                 "提示词": ("STRING", {
                     "default": "",
                     "multiline": True,
-                    "placeholder": "在此输入提示词"
+                    "placeholder": "请输入编辑提示",
+                    "tooltip": "描述对输入图片进行修改的中文指令，可使用端口覆盖。"
+                }),
+                "输入图片": ("IMAGE", {
+                    "tooltip": "待编辑的参考图片，支持批量图像。"
+                }),
+                "生成数量": ("INT", {
+                    "default": 1,
+                    "min": 1,
+                    "max": 5,
+                    "tooltip": "本轮生成目标图像的数量。"
                 }),
             },
             "optional": {
-                "图像1": ("IMAGE",),
-                "图像2": ("IMAGE",),
-                "图像3": ("IMAGE",),
-                "图像4": ("IMAGE",),
-                "参数覆盖JSON": ("STRING", {
-                    "default": "{}",
-                    "multiline": True,
-                    "placeholder": "JSON格式的额外参数,例如 {\"guidance_scale\": 7.5}"
+                "提示词输入": ("STRING", {
+                    "default": "",
+                    "tooltip": "通过连线传入的提示词，优先级高于面板输入。"
                 }),
-                "参数覆盖": ("DICT", {}),
+                "API密钥输入": ("STRING", {
+                    "default": "",
+                    "tooltip": "通过连线传入的 API 密钥，优先级高于面板输入。"
+                }),
+                "数量输入": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "max": 5,
+                    "tooltip": "通过连线设置的生成数量，大于 0 时覆盖面板数值。"
+                }),
+                "极速模式": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "开启后使用官方加速配置，生成更快但可能影响细节。"
+                }),
+                "输出比例": ([
+                    "match_input_image",
+                    "1:1",
+                    "16:9",
+                    "9:16",
+                    "4:3",
+                    "3:4"
+                ], {
+                    "default": "match_input_image",
+                    "tooltip": "生成图片的宽高比，默认跟随输入图片。"
+                }),
+                "输出格式": (["png", "webp", "jpg"], {
+                    "default": "png",
+                    "tooltip": "生成文件格式，选择 PNG 可保留更多细节。"
+                }),
+                "输出质量": ("INT", {
+                    "default": 95,
+                    "min": 0,
+                    "max": 100,
+                    "tooltip": "导出 JPEG/WebP 时的质量值，PNG 格式可忽略。"
+                }),
+                "禁用安全检查": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "关闭官方安全审核，可能输出敏感内容。"
+                }),
+                "随机种子": ("INT", {
+                    "default": -1,
+                    "min": -1,
+                    "max": 4294967295,
+                    "tooltip": "固定随机种子复现实验结果，-1 表示随机。"
+                }),
             },
             "hidden": {
                 "prompt": "PROMPT",
                 "extra_pnginfo": "EXTRA_PNGINFO",
-                "unique_id": "UNIQUE_ID"
-            }
-        }
-
-    RETURN_TYPES = ("DICT", "DICT")
-    RETURN_NAMES = ("准备好的输入", "参数摘要")
-    FUNCTION = "prepare_inputs"
-    CATEGORY = "Replicate/复刻"
-    OUTPUT_NODE = False
-
-    def prepare_inputs(self, 模型信息: Dict[str, Any], 版本ID: str,
-                      API密钥: str, 提示词: str,
-                      图像1: Any = None, 图像2: Any = None,
-                      图像3: Any = None, 图像4: Any = None,
-                      参数覆盖JSON: str = "{}", 参数覆盖: Optional[Dict[str, Any]] = None,
-                      prompt: Dict = None, extra_pnginfo: Dict = None,
-                      unique_id: str = None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        """根据模型 Schema 准备输入参数"""
-        try:
-            if not 模型信息:
-                raise ValueError("未选择模型")
-
-            # Use provided token or load saved token
-            token = API密钥 if API密钥 else load_api_token()
-            if not token:
-                raise ValueError("未提供 API 密钥")
-
-            owner = 模型信息.get('owner')
-            name = 模型信息.get('name')
-            version_id = 版本ID or 模型信息.get('version_id')
-
-            if not owner or not name:
-                raise ValueError("模型信息缺少 owner/name 字段")
-
-            # 获取对应版本的 schema
-            schema: Dict[str, Any] = {}
-            resolved_version_id = version_id
-
-            schema_from_model_info = 模型信息.get("schema")
-            schema_version_id = 模型信息.get("schema_version_id") or 模型信息.get("version_id")
-
-            # 尝试从类级缓存获取
-            cache_key = f"{owner}/{name}@{version_id or 'latest'}"
-            if cache_key in self._schema_cache:
-                schema = self._schema_cache[cache_key]['schema']
-                resolved_version_id = self._schema_cache[cache_key]['version_id']
-            elif schema_from_model_info and (not version_id or schema_version_id == version_id):
-                schema = schema_from_model_info
-                resolved_version_id = schema_version_id or resolved_version_id
-                # 缓存到类级缓存
-                self._schema_cache[cache_key] = {'schema': schema, 'version_id': resolved_version_id}
-            else:
-                try:
-                    loop = asyncio.get_running_loop()
-                except RuntimeError:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-
-                async def _fetch_schema():
-                    async with ReplicateClient(token) as client:
-                        version_payload: Dict[str, Any]
-                        if version_id:
-                            version_payload = await client.get_model_version(owner, name, version_id)
-                        else:
-                            details = await client.get_model_details(owner, name)
-                            version_payload = details.get("latest_version", {})
-                        return extract_model_schema(version_payload), version_payload.get("id", version_id)
-
-                try:
-                    schema, resolved_version_id = loop.run_until_complete(_fetch_schema())
-                    # 缓存获取到的 schema
-                    self._schema_cache[cache_key] = {'schema': schema, 'version_id': resolved_version_id}
-                finally:
-                    # 只在我们创建了新循环时才关闭
-                    try:
-                        asyncio.get_running_loop()
-                    except RuntimeError:
-                        loop.close()
-
-            if not 版本ID and resolved_version_id:
-                版本ID = resolved_version_id
-
-            if not schema:
-                logger.warning("模型 %s/%s 缺少输入 Schema，返回空输入", owner, name)
-                empty_summary = self._build_schema_summary({}, 版本ID)
-                return ({}, empty_summary)
-
-            schema_summary = self._build_schema_summary(schema, 版本ID or resolved_version_id)
-
-            # 解析 JSON overrides
-            overrides_raw: Dict[str, Any] = {}
-            if 参数覆盖JSON and 参数覆盖JSON.strip():
-                try:
-                    overrides_raw.update(json.loads(参数覆盖JSON))
-                except (ValueError, TypeError) as json_error:
-                    raise ValueError(f"参数 JSON 解析失败: {json_error}") from json_error
-
-            if isinstance(参数覆盖, dict):
-                overrides_raw.update(参数覆盖)
-
-            # 来自节点 UI 的当前输入（例如 prompt_text）
-            current_values = {}
-            if prompt and unique_id and str(unique_id) in prompt:
-                current_values = prompt[str(unique_id)].get('inputs', {})
-
-            # 准备图片输入队列
-            image_queue = []
-            for idx, img in enumerate((图像1, 图像2, 图像3, 图像4), 1):
-                if img is not None:
-                    try:
-                        processed_img = self._process_image_input(img, prompt)
-                        image_queue.append(processed_img)
-                    except Exception as img_error:
-                        logger.error(f"处理第{idx}个图片输入时失败: {img_error}")
-                        raise ValueError(f"图片输入{idx}处理失败: {format_error_message(img_error)}")
-
-            # 处理 overrides：区分图片和常规参数
-            manual_overrides: Dict[str, Any] = {}
-            image_overrides: Dict[str, str] = {}
-
-            for param_name, override_value in overrides_raw.items():
-                if param_name not in schema:
-                    logger.debug("忽略未知参数 %s 的 override", param_name)
-                    continue
-
-                param_config = schema[param_name]
-
-                if is_image_parameter(param_config):
-                    image_overrides[param_name] = self._process_image_input(override_value, prompt)
-                else:
-                    manual_overrides[param_name] = override_value
-
-            # 对常规参数做类型安全转换
-            if manual_overrides:
-                sanitized = sanitize_inputs(manual_overrides,
-                                            {name: schema[name] for name in manual_overrides})
-            else:
-                sanitized = {}
-
-            prepared_inputs: Dict[str, Any] = {}
-
-            for param_name, param_config in schema.items():
-                # 1. override 优先
-                if param_name in sanitized:
-                    prepared_inputs[param_name] = sanitized[param_name]
-                    continue
-                if param_name in image_overrides:
-                    prepared_inputs[param_name] = image_overrides[param_name]
-                    continue
-
-                # 2. 图片参数：按顺序取队列
-                if is_image_parameter(param_config):
-                    if image_queue:
-                        prepared_inputs[param_name] = image_queue.pop(0)
-                        continue
-                    # 若 default 存在则使用
-                    if 'default' in param_config:
-                        prepared_inputs[param_name] = param_config['default']
-                        continue
-                    # 无图片且必填，直接报错
-                    if param_config.get('required', False):
-                        raise ValueError(f"模型参数 '{param_name}' 需要图片输入，请连接图片端口或在参数中提供。")
-                    continue
-
-                # 3. 提示词相关参数
-                if self._is_prompt_parameter(param_name, param_config):
-                    value = 提示词 or current_values.get(param_name)
-                    if value:
-                        prepared_inputs[param_name] = str(value)
-                        continue
-
-                # 4. 其他参数：尝试使用当前 UI 值或默认值
-                if param_name in current_values:
-                    value = current_values[param_name]
-                    sanitized_current = sanitize_inputs({param_name: value}, {param_name: param_config})
-                    prepared_inputs.update(sanitized_current)
-                    continue
-
-                if 'default' in param_config:
-                    prepared_inputs[param_name] = param_config['default']
-                    continue
-
-                if param_config.get('required', False):
-                    raise ValueError(f"缺少必填参数 '{param_name}'，请在 JSON 参数或端口中提供。")
-
-            return (prepared_inputs, schema_summary)
-
-        except Exception as e:
-            error_msg = format_error_message(e)
-            raise RuntimeError(error_msg)
-
-    def _process_image_input(self, image_input: Any, prompt: Dict) -> str:
-        """Process image input from node connections"""
-        try:
-            # 直接支持 torch.Tensor / numpy / PIL
-            try:
-                import torch
-            except ImportError:
-                torch = None
-
-            if torch is not None and isinstance(image_input, torch.Tensor):
-                image_input = image_input.detach().cpu().numpy()
-
-            if isinstance(image_input, Image.Image):
-                return convert_image_to_base64(image_input)
-
-            if isinstance(image_input, np.ndarray):
-                return convert_image_to_base64(image_input)
-
-            if isinstance(image_input, list) and len(image_input) > 0:
-                # Assume it's an image tensor from another node
-                image_tensor = image_input[0]
-                if torch is not None and isinstance(image_tensor, torch.Tensor):
-                    image_tensor = image_tensor.detach().cpu().numpy()
-                if isinstance(image_tensor, np.ndarray):
-                    return convert_image_to_base64(image_tensor)
-            elif isinstance(image_input, str):
-                # Assume it's a file path or URL
-                if image_input.startswith('data:image'):
-                    return image_input
-                if image_input.startswith(('http://', 'https://')):
-                    return image_input
-                else:
-                    # Try to load local image
-                    image = Image.open(image_input)
-                    return convert_image_to_base64(image)
-
-            # If we can't process it, return as-is
-            return str(image_input)
-
-        except Exception as e:
-            logger.warning(f"Failed to process image input: {str(e)}")
-            return str(image_input)
-
-    def _is_prompt_parameter(self, param_name: str, param_config: Dict[str, Any]) -> bool:
-        """Determine if parameter corresponds to prompt/text input"""
-        if param_config.get('type', 'string') != 'string':
-            return False
-
-        keywords = ['prompt', 'text', 'caption', 'description', 'query']
-        name_lower = param_name.lower()
-        title_lower = param_config.get('title', '').lower()
-
-        return any(keyword in name_lower or keyword in title_lower for keyword in keywords)
-
-    def _build_schema_summary(self, schema: Dict[str, Any], version_id: Optional[str]) -> Dict[str, Any]:
-        """Summarize schema information for UI 显示"""
-        summary: Dict[str, Any] = {}
-
-        for param_name, param_config in schema.items():
-            summary[param_name] = {
-                "type": param_config.get("type", "string"),
-                "required": param_config.get("required", False),
-                "default": param_config.get("default"),
-                "enum": param_config.get("enum"),
-                "description": param_config.get("description"),
-                "title": param_config.get("title", param_name),
-                "is_image": is_image_parameter(param_config),
-                "is_prompt": self._is_prompt_parameter(param_name, param_config),
-            }
-
-        summary["_meta"] = {"version_id": version_id}
-        return summary
-
-    @classmethod
-    def IS_CHANGED(cls, 模型信息: Dict[str, Any], 版本ID: str,
-                   API密钥: str, 提示词: str = "",
-                   图像1: Any = None, 图像2: Any = None,
-                   图像3: Any = None, 图像4: Any = None,
-                   参数覆盖JSON: str = "{}", 参数覆盖: Optional[Dict[str, Any]] = None,
-                   **kwargs):
-        """Check if node inputs have changed"""
-        return hash((
-            str(模型信息),
-            版本ID,
-            API密钥,
-            提示词,
-            参数覆盖JSON,
-            str(参数覆盖)
-        ))
-
-class ReplicatePrediction:
-    """预测执行节点"""
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "版本ID": ("STRING", {"default": ""}),
-                "准备好的输入": ("DICT", {}),
-                "API密钥": ("STRING", {
-                    "default": "",
-                    "multiline": False,
-                    "placeholder": "留空则使用已保存的密钥"
-                }),
-                "超时时间": ("INT", {"default": 300, "min": 10, "max": 1800}),
-                "轮询间隔": ("INT", {"default": 2, "min": 1, "max": 10}),
+                "unique_id": "UNIQUE_ID",
             },
-            "optional": {
-                "回调地址": ("STRING", {
-                    "default": "",
-                    "multiline": False,
-                    "placeholder": "可选的 Webhook 回调地址"
-                }),
-            }
-        }
-
-    RETURN_TYPES = ("STRING", "STRING", "DICT")
-    RETURN_NAMES = ("预测ID", "状态", "结果")
-    FUNCTION = "run_prediction"
-    CATEGORY = "Replicate/复刻"
-    OUTPUT_NODE = True
-
-    def run_prediction(self, 版本ID: str, 准备好的输入: Dict[str, Any],
-                      API密钥: str, 超时时间: int = 300, 轮询间隔: int = 2,
-                      回调地址: str = "") -> Tuple[str, str, Dict[str, Any]]:
-        """在 Replicate 上运行预测"""
-        try:
-            if not 版本ID:
-                raise ValueError("未提供模型版本")
-            if not 准备好的输入:
-                raise ValueError("未准备输入参数")
-
-            # Use provided token or load saved token
-            token = API密钥 if API密钥 else load_api_token()
-            if not token:
-                raise ValueError("未提供 API 密钥")
-
-            # 获取或创建事件循环
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-
-            async def _run_prediction():
-                async with ReplicateClient(token) as client:
-                    # Create prediction
-                    prediction = await client.create_prediction(
-                        version_id=版本ID,
-                        inputs=准备好的输入,
-                        webhook=回调地址 if 回调地址 else None
-                    )
-
-                    logger.info(f"Created prediction: {prediction.id}")
-
-                    # Wait for completion
-                    try:
-                        result = await client.wait_for_prediction(
-                            prediction_id=prediction.id,
-                            timeout=超时时间,
-                            poll_interval=轮询间隔
-                        )
-
-                        if result.status == 'succeeded':
-                            logger.info(f"Prediction {prediction.id} completed successfully")
-                            return prediction.id, result.status, {
-                                'output': result.output,
-                                'logs': result.logs,
-                                'created_at': result.created_at,
-                                'completed_at': result.completed_at
-                            }
-                        elif result.status == 'failed':
-                            error_msg = result.error or "预测失败"
-                            raise RuntimeError(f"预测失败: {error_msg}")
-                        elif result.status == 'canceled':
-                            raise RuntimeError("预测已取消")
-                        else:
-                            raise RuntimeError(f"未知的预测状态: {result.status}")
-
-                    except TimeoutError:
-                        # Cancel the prediction
-                        await client.cancel_prediction(prediction.id)
-                        raise RuntimeError(f"预测超时 ({超时时间} 秒)")
-
-            prediction_id, status, results = loop.run_until_complete(_run_prediction())
-
-            # 只在我们创建了新循环时才关闭
-            try:
-                asyncio.get_running_loop()
-            except RuntimeError:
-                loop.close()
-
-            return prediction_id, status, results
-
-        except Exception as e:
-            error_msg = format_error_message(e)
-            raise RuntimeError(error_msg)
-
-class ReplicateConfig:
-    """配置节点"""
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "API密钥": ("STRING", {
-                    "default": "",
-                    "multiline": False,
-                    "password": True,
-                    "placeholder": "输入你的 Replicate API 密钥"
-                }),
-                "保存密钥": ("BOOLEAN", {"default": True}),
-                "测试连接": ("BOOLEAN", {"default": False}),
-            }
-        }
-
-    RETURN_TYPES = ("STRING", "BOOLEAN")
-    RETURN_NAMES = ("状态", "成功")
-    FUNCTION = "configure_token"
-    CATEGORY = "Replicate/复刻"
-    OUTPUT_NODE = True
-
-    def configure_token(self, API密钥: str, 保存密钥: bool, 测试连接: bool) -> Tuple[str, bool]:
-        """配置并测试 Replicate API 密钥"""
-        try:
-            if not API密钥:
-                return ("未提供密钥", False)
-
-            # Test connection if requested
-            if 测试连接:
-                try:
-                    loop = asyncio.get_running_loop()
-                except RuntimeError:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-
-                async def _test_connection():
-                    async with ReplicateClient(API密钥) as client:
-                        # Try to list models to test connection
-                        await client.list_models(limit=1)
-                        return True
-
-                try:
-                    success = loop.run_until_complete(_test_connection())
-
-                    # 只在我们创建了新循环时才关闭
-                    try:
-                        asyncio.get_running_loop()
-                    except RuntimeError:
-                        loop.close()
-
-                    if not success:
-                        return ("连接测试失败", False)
-                except Exception as e:
-                    try:
-                        asyncio.get_running_loop()
-                    except RuntimeError:
-                        loop.close()
-                    return (f"连接测试失败: {format_error_message(e)}", False)
-
-            # Save token if requested
-            if 保存密钥:
-                save_api_token(API密钥)
-
-            return ("API 密钥配置成功", True)
-
-        except Exception as e:
-            error_msg = format_error_message(e)
-            return (error_msg, False)
-
-class ReplicateOutputProcessor:
-    """输出处理节点"""
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "结果": ("DICT", {}),
-            }
         }
 
     RETURN_TYPES = ("IMAGE", "STRING", "STRING")
-    RETURN_NAMES = ("图像", "文本", "原始输出")
-    FUNCTION = "process_output"
-    CATEGORY = "Replicate/复刻"
-    OUTPUT_NODE = False
+    RETURN_NAMES = ("生成图像", "文本输出", "原始结果")
+    FUNCTION = "predict"
+    CATEGORY = "Replicate/模型"
 
-    def process_output(self, 结果: Dict[str, Any]) -> Tuple[Any, str, str]:
-        """处理 Replicate 预测输出"""
+    def _build_payload(
+        self,
+        prompt: str,
+        image_inputs: List[str],
+        params: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        quality = int(params.get("输出质量", 95))
+        quality = max(0, min(100, quality))
+
+        payload = {
+            "prompt": prompt,
+            "image": image_inputs,
+            "go_fast": bool(params.get("极速模式", True)),
+            "aspect_ratio": params.get("输出比例", "match_input_image"),
+            "output_format": params.get("输出格式", "png"),
+            "output_quality": quality,
+            "disable_safety_checker": bool(params.get("禁用安全检查", False)),
+        }
+
+        seed = params.get("随机种子", -1)
+        if isinstance(seed, int) and seed >= 0:
+            payload["seed"] = seed
+
+        return payload
+
+
+class ReplicateSeedream4(ReplicateModelNodeBase):
+    MODEL_OWNER = "bytedance"
+    MODEL_NAME = "seedream-4"
+    MAX_REFERENCE_IMAGES = 10
+    SUPPORTS_NATIVE_BATCH = True
+    DESCRIPTION = "Seedream 4：文本或参考图生成多张高清图像。"
+    CATEGORY = "Replicate/图像"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "API密钥": ("STRING", {
+                    "default": "",
+                    "password": True,
+                    "placeholder": "留空使用已保存的密钥",
+                    "tooltip": "用于访问 Replicate 服务的 API 密钥，可通过端口输入或自动读取配置。"
+                }),
+                "提示词": ("STRING", {
+                    "default": "",
+                    "multiline": True,
+                    "placeholder": "请输入生成提示",
+                    "tooltip": "描述目标场景与风格的中文指令，可通过端口覆盖。"
+                }),
+                "生成数量": ("INT", {
+                    "default": 1,
+                    "min": 1,
+                    "max": 5,
+                    "tooltip": "本轮生成目标图片数量，支持最多 5 张。"
+                }),
+            },
+            "optional": {
+                "提示词输入": ("STRING", {
+                    "default": "",
+                    "tooltip": "通过连线传入的提示词，优先级高于面板输入。"
+                }),
+                "API密钥输入": ("STRING", {
+                    "default": "",
+                    "tooltip": "通过连线传入的 API 密钥，优先级高于面板输入。"
+                }),
+                "数量输入": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "max": 5,
+                    "tooltip": "通过连线设置的生成数量，大于 0 时覆盖面板数值。"
+                }),
+                "输入图片": ("IMAGE", {
+                    "tooltip": "可选的参考图片，用于图生图或多图混合生成。"
+                }),
+                "分辨率": (["1K", "2K", "4K", "custom"], {
+                    "default": "2K",
+                    "tooltip": "输出分辨率预设，选择 custom 时需指定宽高。"
+                }),
+                "长宽比": ([
+                    "match_input_image",
+                    "1:1",
+                    "4:3",
+                    "3:4",
+                    "16:9",
+                    "9:16",
+                    "3:2",
+                    "2:3",
+                    "21:9"
+                ], {
+                    "default": "match_input_image",
+                    "tooltip": "输出图像的宽高比，默认与输入图片匹配。"
+                }),
+                "自定义宽度": ("INT", {
+                    "default": 2048,
+                    "min": 1024,
+                    "max": 4096,
+                    "tooltip": "当分辨率选择 custom 时的输出宽度。"
+                }),
+                "自定义高度": ("INT", {
+                    "default": 2048,
+                    "min": 1024,
+                    "max": 4096,
+                    "tooltip": "当分辨率选择 custom 时的输出高度。"
+                }),
+                "顺序生成": (["disabled", "auto"], {
+                    "default": "disabled",
+                    "tooltip": "自动生成同主题多图时选择 auto，单图生成保持 disabled。"
+                }),
+            },
+            "hidden": {
+                "prompt": "PROMPT",
+                "extra_pnginfo": "EXTRA_PNGINFO",
+                "unique_id": "UNIQUE_ID",
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "STRING", "STRING")
+    RETURN_NAMES = ("生成图像", "文本输出", "原始结果")
+    FUNCTION = "predict"
+    CATEGORY = "Replicate/模型"
+
+    def _build_payload(
+        self,
+        prompt: str,
+        image_inputs: List[str],
+        params: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        size = params.get("分辨率", "2K")
+        aspect_ratio = params.get("长宽比", "match_input_image")
+        mode = params.get("顺序生成", "disabled")
+
+        payload: Dict[str, Any] = {
+            "prompt": prompt,
+            "image_input": image_inputs,
+            "size": size,
+            "aspect_ratio": aspect_ratio,
+            "sequential_image_generation": mode,
+        }
+
+        if size == "custom":
+            width = int(params.get("自定义宽度", 2048))
+            height = int(params.get("自定义高度", 2048))
+            width = max(1024, min(4096, width))
+            height = max(1024, min(4096, height))
+            payload["width"] = width
+            payload["height"] = height
+
+        return payload
+
+    def _prepare_request_payload(
+        self,
+        payload: Dict[str, Any],
+        requested_count: int,
+        iteration: int,
+    ) -> Dict[str, Any]:
+        data = dict(payload)
+
+        if requested_count > 1:
+            data["sequential_image_generation"] = "auto"
+            data["max_images"] = min(15, requested_count)
+        else:
+            data["sequential_image_generation"] = data.get(
+                "sequential_image_generation",
+                "disabled",
+            )
+            data.pop("max_images", None)
+
+        return data
+
+
+class ReplicateNanoBanana(ReplicateModelNodeBase):
+    MODEL_OWNER = "google"
+    MODEL_NAME = "nano-banana"
+    MAX_REFERENCE_IMAGES = 4
+    DESCRIPTION = "Nano Banana：轻量快速的多模态图像生成。"
+    CATEGORY = "Replicate/图像"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "API密钥": ("STRING", {
+                    "default": "",
+                    "password": True,
+                    "placeholder": "留空使用已保存的密钥",
+                    "tooltip": "用于访问 Replicate 服务的 API 密钥，可通过端口输入或自动读取配置。"
+                }),
+                "提示词": ("STRING", {
+                    "default": "",
+                    "multiline": True,
+                    "placeholder": "请输入生成提示",
+                    "tooltip": "描述目标画面的中文指令，可通过端口覆盖。"
+                }),
+                "生成数量": ("INT", {
+                    "default": 1,
+                    "min": 1,
+                    "max": 5,
+                    "tooltip": "本轮生成目标图片数量，支持最多 5 张。"
+                }),
+            },
+            "optional": {
+                "提示词输入": ("STRING", {
+                    "default": "",
+                    "tooltip": "通过连线传入的提示词，优先级高于面板输入。"
+                }),
+                "API密钥输入": ("STRING", {
+                    "default": "",
+                    "tooltip": "通过连线传入的 API 密钥，优先级高于面板输入。"
+                }),
+                "数量输入": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "max": 5,
+                    "tooltip": "通过连线设置的生成数量，大于 0 时覆盖面板数值。"
+                }),
+                "输入图片": ("IMAGE", {
+                    "tooltip": "可选的参考图片列表，帮助模型保持角色与风格一致。"
+                }),
+                "长宽比": ([
+                    "match_input_image",
+                    "1:1",
+                    "2:3",
+                    "3:2",
+                    "3:4",
+                    "4:3",
+                    "4:5",
+                    "5:4",
+                    "9:16",
+                    "16:9",
+                    "21:9"
+                ], {
+                    "default": "match_input_image",
+                    "tooltip": "输出图像的宽高比，默认与输入图片匹配。"
+                }),
+                "输出格式": (["jpg", "png"], {
+                    "default": "jpg",
+                    "tooltip": "生成文件格式，PNG 可提供无损质量。"
+                }),
+            },
+            "hidden": {
+                "prompt": "PROMPT",
+                "extra_pnginfo": "EXTRA_PNGINFO",
+                "unique_id": "UNIQUE_ID",
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "STRING", "STRING")
+    RETURN_NAMES = ("生成图像", "文本输出", "原始结果")
+    FUNCTION = "predict"
+    CATEGORY = "Replicate/模型"
+
+    def _build_payload(
+        self,
+        prompt: str,
+        image_inputs: List[str],
+        params: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        return {
+            "prompt": prompt,
+            "image_input": image_inputs,
+            "aspect_ratio": params.get("长宽比", "match_input_image"),
+            "output_format": params.get("输出格式", "jpg"),
+        }
+
+
+class ReplicateAPIKeyLink:
+    """提供或持久化 Replicate API 密钥的节点。"""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "API密钥": ("STRING", {
+                    "default": "",
+                    "password": True,
+                    "placeholder": "手动输入或留空",
+                    "tooltip": "面板输入的 API 密钥，若留空可使用端口数据或已保存配置。"
+                }),
+                "保存到配置": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "选中后将密钥写入插件 config.json，下次自动读取。"
+                }),
+                "允许配置回退": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "当未提供密钥时，允许读取已保存或环境变量中的密钥。"
+                }),
+            },
+            "optional": {
+                "API密钥输入": ("STRING", {
+                    "default": "",
+                    "tooltip": "通过连线传入的密钥，优先级高于面板输入。"
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("API密钥", "状态")
+    FUNCTION = "link"
+    DESCRIPTION = "读取、复用或保存 Replicate API 密钥，便于在多个节点之间共享。"
+    CATEGORY = "Replicate/配置"
+
+    def link(self, **kwargs):
         try:
-            import torch
-            import requests
-            from io import BytesIO
-        except ImportError as e:
-            raise RuntimeError(f"缺少必要的依赖: {e}")
+            manual = kwargs.get("API密钥", "")
+            incoming = kwargs.get("API密钥输入")
+            allow_fallback = bool(kwargs.get("允许配置回退", True))
 
-        output = 结果.get('output')
-        if not output:
-            return (None, "", json.dumps(结果, indent=2))
+            token = manual
+            if isinstance(incoming, str) and incoming.strip():
+                token = incoming
 
-        # 处理不同类型的输出
-        image_tensor = None
-        text_output = ""
+            if not token and allow_fallback:
+                token = load_api_token()
 
-        # 如果输出是列表
-        if isinstance(output, list):
-            # 尝试处理图像URL
-            for item in output:
-                if isinstance(item, str) and item.startswith(('http://', 'https://')):
-                    try:
-                        response = requests.get(item, timeout=30)
-                        response.raise_for_status()
-                        img = Image.open(BytesIO(response.content))
+            if not token:
+                raise ValueError("未提供 API 密钥，且未启用配置回退")
 
-                        # 转换为ComfyUI格式: [B,H,W,C] in 0-1 range
-                        img_array = np.array(img.convert('RGB')).astype(np.float32) / 255.0
-                        image_tensor = torch.from_numpy(img_array).unsqueeze(0)  # Add batch dimension
-                        break
-                    except Exception as e:
-                        logger.warning(f"下载图像失败 {item}: {e}")
-                        continue
-                elif isinstance(item, str):
-                    text_output += item + "\n"
-
-        # 如果输出是单个URL
-        elif isinstance(output, str):
-            if output.startswith(('http://', 'https://')):
-                try:
-                    response = requests.get(output, timeout=30)
-                    response.raise_for_status()
-                    img = Image.open(BytesIO(response.content))
-
-                    img_array = np.array(img.convert('RGB')).astype(np.float32) / 255.0
-                    image_tensor = torch.from_numpy(img_array).unsqueeze(0)
-                except Exception as e:
-                    logger.warning(f"下载图像失败: {e}")
-                    text_output = output
+            if kwargs.get("保存到配置", False):
+                save_api_token(token)
+                status = "已保存 API 密钥"
+            elif token == manual or (isinstance(incoming, str) and incoming.strip()):
+                status = "使用输入的 API 密钥"
             else:
-                text_output = output
+                status = "使用已保存的 API 密钥"
 
-        raw_output = json.dumps(output, indent=2, ensure_ascii=False)
+            return (token, status)
 
-        return (image_tensor, text_output.strip(), raw_output)
+        except Exception as exc:
+            raise RuntimeError(format_error_message(exc))
 
-# Node mappings for ComfyUI
+
 NODE_CLASS_MAPPINGS = {
-    "ReplicateModelSelector": ReplicateModelSelector,
-    "ReplicateDynamicNode": ReplicateDynamicNode,
-    "ReplicatePrediction": ReplicatePrediction,
-    "ReplicateConfig": ReplicateConfig,
-    "ReplicateOutputProcessor": ReplicateOutputProcessor,
+    "ReplicateQwenImageEditPlus": ReplicateQwenImageEditPlus,
+    "ReplicateSeedream4": ReplicateSeedream4,
+    "ReplicateNanoBanana": ReplicateNanoBanana,
+    "ReplicateAPIKeyLink": ReplicateAPIKeyLink,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "ReplicateModelSelector": "Replicate 模型选择器",
-    "ReplicateDynamicNode": "Replicate 动态参数",
-    "ReplicatePrediction": "Replicate 预测执行",
-    "ReplicateConfig": "Replicate 配置",
-    "ReplicateOutputProcessor": "Replicate 输出处理",
+    "ReplicateQwenImageEditPlus": "qwen/qwen-image-edit-plus",
+    "ReplicateSeedream4": "bytedance/seedream-4",
+    "ReplicateNanoBanana": "google/nano-banana",
+    "ReplicateAPIKeyLink": "Replicate API 密钥",
 }
