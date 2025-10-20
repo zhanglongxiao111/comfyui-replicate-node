@@ -43,6 +43,7 @@ class ReplicateModelNodeBase:
     REQUEST_TIMEOUT: int = 300
     POLL_INTERVAL: int = 2
     IMAGE_INPUT_KEYS: Tuple[str, ...] = ("输入图片",)
+    ENABLE_CONCURRENCY: bool = False
 
     _version_cache: Dict[str, str] = {}
 
@@ -137,6 +138,7 @@ class ReplicateModelNodeBase:
         client: ReplicateClient,
         payload: Dict[str, Any],
         desired_count: int,
+        concurrent: bool = False,
     ):
         version_id = await self._get_latest_version_id(client)
 
@@ -144,6 +146,61 @@ class ReplicateModelNodeBase:
         text_parts: List[str] = []
         raw_records: List[Dict[str, Any]] = []
         iteration = 0
+
+        if not self.SUPPORTS_NATIVE_BATCH and concurrent and desired_count > 1:
+            tasks = []
+            for idx in range(desired_count):
+                request_inputs = self._prepare_request_payload(payload, 1, idx + 1)
+                tasks.append(
+                    self._create_and_wait(
+                        client,
+                        version_id,
+                        request_inputs,
+                    )
+                )
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            for result in results:
+                if isinstance(result, Exception):
+                    raise result
+                prediction, prediction_result = result
+                raw_records.append(
+                    {
+                        "prediction_id": prediction.id,
+                        "inputs": payload,
+                        "output": prediction_result.output,
+                        "logs": prediction_result.logs,
+                        "status": prediction_result.status,
+                    }
+                )
+                image_arrays, texts = parse_replicate_outputs(prediction_result.output)
+                if image_arrays:
+                    images.extend(image_arrays)
+                if texts:
+                    text_parts.extend(texts)
+                if prediction_result.logs:
+                    text_parts.append(prediction_result.logs)
+
+            if len(images) < desired_count:
+                missing = desired_count - len(images)
+                (
+                    extra_images,
+                    extra_texts,
+                    extra_records,
+                ) = await self._run_prediction_batch(
+                    client,
+                    payload,
+                    missing,
+                    concurrent=False,
+                )
+                images.extend(extra_images)
+                text_parts.extend(extra_texts)
+                raw_records.extend(extra_records)
+
+            if not images:
+                raise RuntimeError("模型未返回可用图像")
+
+            return images[:desired_count], text_parts, raw_records
 
         while len(images) < desired_count:
             iteration += 1
@@ -157,7 +214,9 @@ class ReplicateModelNodeBase:
             else:
                 request_count = 1
 
-            request_inputs = self._prepare_request_payload(payload, request_count, iteration)
+            request_inputs = self._prepare_request_payload(
+                payload, request_count, iteration
+            )
 
             prediction, result = await self._create_and_wait(
                 client,
@@ -214,15 +273,22 @@ class ReplicateModelNodeBase:
         token: str,
         payload: Dict[str, Any],
         desired_count: int,
+        concurrent: bool = False,
     ):
         async with ReplicateClient(token) as client:
-            return await self._run_prediction_batch(client, payload, desired_count)
+            return await self._run_prediction_batch(
+                client,
+                payload,
+                desired_count,
+                concurrent=concurrent,
+            )
 
     def _execute_predictions(
         self,
         token: str,
         payload: Dict[str, Any],
         desired_count: int,
+        concurrent: bool = False,
     ):
         created_loop = False
         try:
@@ -234,7 +300,12 @@ class ReplicateModelNodeBase:
 
         try:
             return loop.run_until_complete(
-                self._async_predict(token, payload, desired_count)
+                self._async_predict(
+                    token,
+                    payload,
+                    desired_count,
+                    concurrent=concurrent,
+                )
             )
         finally:
             if created_loop:
@@ -274,10 +345,15 @@ class ReplicateModelNodeBase:
             image_inputs = self._prepare_images(raw_batches)
             payload = self._build_payload(prompt, image_inputs, kwargs)
 
+            concurrent = False
+            if self.ENABLE_CONCURRENCY:
+                concurrent = bool(kwargs.get("并发生成", False))
+
             image_arrays, text_parts, raw_records = self._execute_predictions(
                 token,
                 payload,
                 desired_count,
+                concurrent=concurrent,
             )
 
             image_tensor = stack_image_arrays(image_arrays)
@@ -304,6 +380,7 @@ class ReplicateQwenImageEditPlus(ReplicateModelNodeBase):
     REQUIRE_IMAGE = True
     MAX_REFERENCE_IMAGES = 4
     IMAGE_INPUT_KEYS = ("输入图片", "输入图片2", "输入图片3")
+    ENABLE_CONCURRENCY = True
     DESCRIPTION = "图像编辑：根据中文提示修改输入图片，支持多图批量生成。"
     CATEGORY = "Replicate/图像"
 
@@ -343,6 +420,10 @@ class ReplicateQwenImageEditPlus(ReplicateModelNodeBase):
                 "提示词输入": ("STRING", {
                     "default": "",
                     "tooltip": "通过连线传入的提示词，优先级高于面板输入。"
+                }),
+                "并发生成": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "同时并发调用 Replicate 接口生成多张图像（可能触发速率限制）。"
                 }),
                 "API密钥输入": ("STRING", {
                     "default": "",
@@ -586,6 +667,7 @@ class ReplicateNanoBanana(ReplicateModelNodeBase):
     MODEL_NAME = "nano-banana"
     MAX_REFERENCE_IMAGES = 4
     IMAGE_INPUT_KEYS = ("输入图片", "输入图片2", "输入图片3")
+    ENABLE_CONCURRENCY = True
     DESCRIPTION = "Nano Banana：轻量快速的多模态图像生成。"
     CATEGORY = "Replicate/图像"
 
@@ -626,6 +708,11 @@ class ReplicateNanoBanana(ReplicateModelNodeBase):
                     "default": "",
                     "tooltip": "通过连线传入的提示词，优先级高于面板输入。"
                 }),
+                "并发生成": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "同时并发调用 Replicate 接口生成多张图像（可能触发速率限制）。"
+                }),
+
                 "API密钥输入": ("STRING", {
                     "default": "",
                     "tooltip": "通过连线传入的 API 密钥，优先级高于面板输入。"
